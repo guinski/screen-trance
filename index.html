@@ -126,6 +126,7 @@ function buildDisc(color, r) {
 }
 
 let discR = 0;
+let whiteDiscIdx = -1; // index of the white coverage disc in singleDiscs
 
 const CMY = ['#00ffff', '#ff00ff', '#ffff00'];
 const RGB = ['#ff0000', '#00ff00', '#0000ff'];
@@ -134,16 +135,19 @@ const RGB = ['#ff0000', '#00ff00', '#0000ff'];
 const CMY_SPEEDS = [ 0.00750,  0.00728,  0.00773];
 const RGB_SPEEDS = [-0.00773, -0.00728, -0.00750];
 const ALL_SPEEDS = [...CMY_SPEEDS, ...RGB_SPEEDS];
+const ALL_VEL_MULT = [0.85, 1.00, 1.15, 1.20, 0.90, 1.00]; // C,M,Y,R,G,B
 
 // All start at 0 = fully aligned = black (CMY) / white (RGB)
 const angles = [0, 0, 0, 0, 0, 0];
 
 function rebuildDiscs(W, H, cxDark, cyDark, cxLight, cyLight) {
   const r1 = Math.sqrt(Math.max(cxDark,  W-cxDark) **2 + Math.max(cyDark,  H-cyDark) **2) * 1.05;
-  const r2 = Math.sqrt(Math.max(cxLight, W-cxLight)**2 + Math.max(cxLight, H-cyLight)**2) * 1.05;
+  const r2 = Math.sqrt(Math.max(cxLight, W-cxLight)**2 + Math.max(cyLight, H-cyLight)**2) * 1.05;
   discR = Math.max(r1, r2);
   singleDiscs.length = 0;
   [...CMY, ...RGB].forEach(color => singleDiscs.push(buildDisc(color, discR)));
+  whiteDiscIdx = singleDiscs.length;
+  singleDiscs.push(buildDisc('#ffffff', discR));
 }
 
 function resize() {
@@ -181,17 +185,23 @@ function drawFrame() {
   const cxL = W * F.circleX, cyL = H * F.circleY; // light side center (circle eye)
   const cxD = W * (F.sqX + F.sqW/2), cyD = H * (F.sqY + F.sqH/2); // dark side center (square eye)
 
-  // ── Dark system (CMY, multiply onto white → black when aligned) ──
-  // Step 1: white background
-  ctxDark.fillStyle = '#fff';
+  // ── Dark system (CMY, multiply onto white patches → black when aligned) ──
+  // Step 1: black background (this IS the correct rest/gap color now)
+  ctxDark.fillStyle = '#000';
   ctxDark.fillRect(0, 0, W, H);
-  // Step 2: CMY discs with multiply
+  // Step 2: patch white only where any CMY arm will land (union coverage),
+  // so multiply has something to act on there, while true gaps stay black.
+  ctxDark.globalCompositeOperation = 'source-over';
+  blitDisc(ctxDark, whiteDiscIdx, cxD, cyD, angles[0]);
+  blitDisc(ctxDark, whiteDiscIdx, cxD, cyD, angles[1]);
+  blitDisc(ctxDark, whiteDiscIdx, cxD, cyD, angles[2]);
+  // Step 3: CMY discs with multiply onto those white patches
   ctxDark.globalCompositeOperation = 'multiply';
   blitDisc(ctxDark, 0, cxD, cyD, angles[0]); // C
   blitDisc(ctxDark, 1, cxD, cyD, angles[1]); // M
   blitDisc(ctxDark, 2, cxD, cyD, angles[2]); // Y
   ctxDark.globalCompositeOperation = 'source-over';
-  // Step 3: clip to dark face region
+  // Step 4: clip to dark face region
   ctxDark.globalCompositeOperation = 'destination-in';
   ctxDark.drawImage(maskDark, 0, 0);
   ctxDark.globalCompositeOperation = 'source-over';
@@ -223,13 +233,19 @@ let audioCtx = null;
 const audioOscs = [];
 const BASE_FREQS = [200, 700, 1750];
 
+let audioMaster = null;
+
 function initAudio() {
   if (audioCtx) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume().catch(err => console.warn('AudioContext resume failed:', err));
+  }
   const master = audioCtx.createGain();
   master.gain.setValueAtTime(0, audioCtx.currentTime);
   master.gain.linearRampToValueAtTime(0.4, audioCtx.currentTime + 1);
   master.connect(audioCtx.destination);
+  audioMaster = master;
 
   BASE_FREQS.forEach((freq, i) => {
     const osc = audioCtx.createOscillator();
@@ -266,13 +282,92 @@ function startExperience() {
   started = true;
   const el = document.documentElement;
   const req = el.requestFullscreen || el.webkitRequestFullscreen;
-  if (req) req.call(el).catch(() => {});
+  if (!req) console.warn('Fullscreen API not available in this browser/webview.');
+  else req.call(el).catch(err => console.warn('Fullscreen request failed:', err));
   initAudio();
   requestAnimationFrame(render);
 }
 
+function isInsideCircle(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (clientX - rect.left) * scaleX;
+  const y = (clientY - rect.top) * scaleY;
+  const cx = canvas.width * F.circleX, cy = canvas.height * F.circleY, r = canvas.width * F.circleR;
+  return Math.hypot(x - cx, y - cy) <= r;
+}
+
+function isInsideSquare(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (clientX - rect.left) * scaleX;
+  const y = (clientY - rect.top) * scaleY;
+  const sx = canvas.width * F.sqX, sy = canvas.height * F.sqY;
+  const sw = canvas.width * F.sqW, sh = canvas.height * F.sqH;
+  return x >= sx && x <= sx + sw && y >= sy && y <= sy + sh;
+}
+
+let paused = false;
+
+function togglePause() {
+  paused = !paused;
+  if (audioCtx && audioMaster) {
+    const target = paused ? 0 : 0.4;
+    audioMaster.gain.cancelScheduledValues(audioCtx.currentTime);
+    audioMaster.gain.linearRampToValueAtTime(target, audioCtx.currentTime + 0.2);
+  }
+}
+
+let tapCount = 0, lastTapTime = 0;
+const TAP_WINDOW = 600;
+
+function captureHighRes() {
+  const targetW = 1080;
+  const targetH = Math.round(targetW / PHONE_ASPECT);
+  const prevW = canvas.width, prevH = canvas.height;
+
+  [canvas, offDark, offLight, offWhiteBg, maskLight, maskDark].forEach(cv => { cv.width = targetW; cv.height = targetH; });
+  buildMasks(targetW, targetH);
+  const cxL = targetW * F.circleX, cyL = targetH * F.circleY;
+  const cxD = targetW * (F.sqX + F.sqW / 2), cyD = targetH * (F.sqY + F.sqH / 2);
+  rebuildDiscs(targetW, targetH, cxD, cyD, cxL, cyL);
+  drawFrame();
+
+  canvas.toBlob(blob => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'screen-trance-' + Date.now() + '.png';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }, 'image/png');
+
+  [canvas, offDark, offLight, offWhiteBg, maskLight, maskDark].forEach(cv => { cv.width = prevW; cv.height = prevH; });
+  buildMasks(prevW, prevH);
+  const cxL2 = prevW * F.circleX, cyL2 = prevH * F.circleY;
+  const cxD2 = prevW * (F.sqX + F.sqW / 2), cyD2 = prevH * (F.sqY + F.sqH / 2);
+  rebuildDiscs(prevW, prevH, cxD2, cyD2, cxL2, cyL2);
+  drawFrame();
+}
+
+let downX = null, downY = null, downTime = null;
+
 canvas.addEventListener('pointerdown', e => {
   startExperience();
+
+  downX = e.clientX; downY = e.clientY; downTime = performance.now();
+
+  if (isInsideCircle(e.clientX, e.clientY)) {
+    const now = performance.now();
+    tapCount = (now - lastTapTime < TAP_WINDOW) ? tapCount + 1 : 1;
+    lastTapTime = now;
+    if (tapCount >= 3) { tapCount = 0; captureHighRes(); }
+  }
+
   lastX = e.clientX; lastY = e.clientY; lastT = performance.now();
 });
 canvas.addEventListener('pointermove', e => {
@@ -289,21 +384,36 @@ canvas.addEventListener('pointermove', e => {
   }
   lastX = e.clientX; lastY = e.clientY; lastT = now;
 });
-canvas.addEventListener('pointerup', () => { lastX = null; lastY = null; });
+canvas.addEventListener('pointerup', e => {
+  const dt = performance.now() - (downTime || 0);
+  const dist = Math.hypot(e.clientX - (downX || e.clientX), e.clientY - (downY || e.clientY));
+  if (dt < 300 && dist < 10 && isInsideSquare(e.clientX, e.clientY)) {
+    togglePause();
+  }
+  lastX = null; lastY = null;
+});
 canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
 canvas.addEventListener('touchmove',  e => e.preventDefault(), { passive: false });
 
 // ── Render loop ───────────────────────────────────────────────────────────────
-function render() {
+const FRAME_INTERVAL = 1000 / 24;
+let lastFrameTime = 0;
+
+function render(now) {
   requestAnimationFrame(render);
+  if (now - lastFrameTime < FRAME_INTERVAL) return;
+  lastFrameTime = now;
+
+  if (paused) return;
+
   velocity *= friction;
-  angles.forEach((_, i) => { angles[i] += ALL_SPEEDS[i] + velocity; });
+  angles.forEach((_, i) => { angles[i] += ALL_SPEEDS[i] + velocity * ALL_VEL_MULT[i]; });
 
   if (audioCtx) {
     const speed = Math.abs(velocity);
     audioOscs.forEach(({ lfo, osc }, i) => {
-      lfo.frequency.value = (0.30 + i * 0.01) + speed * 4;
-      osc.frequency.value = BASE_FREQS[i] + speed * 40;
+      lfo.frequency.value = (0.30 + i * 0.01) + speed * 6;
+      osc.frequency.value = BASE_FREQS[i] * (1 + speed * 0.6);
     });
   }
 
