@@ -206,11 +206,19 @@ function drawFrame() {
   ctxDark.drawImage(maskDark, 0, 0);
   ctxDark.globalCompositeOperation = 'source-over';
 
-  // ── Light system (RGB, screen onto black → white when aligned) ──
-  // Step 1: black background
-  ctxLight.fillStyle = '#000';
+  // ── Light system (RGB, screen onto white → white in gaps, white when aligned) ──
+  // Step 1: white background — gaps stay white
+  ctxLight.fillStyle = '#fff';
   ctxLight.fillRect(0, 0, W, H);
-  // Step 2: RGB discs with screen
+  // Step 2: stamp black disc over union of arm coverage, so screen has #000 to work on
+  //         (screen(#000, color) = color; screen(#fff, color) = #fff — we want gaps white,
+  //          arms colored, so we need black under each arm area only)
+  ctxLight.globalCompositeOperation = 'destination-out'; // punch holes = black in canvas
+  blitDisc(ctxLight, whiteDiscIdx, cxL, cyL, angles[3]);
+  blitDisc(ctxLight, whiteDiscIdx, cxL, cyL, angles[4]);
+  blitDisc(ctxLight, whiteDiscIdx, cxL, cyL, angles[5]);
+  ctxLight.globalCompositeOperation = 'source-over';
+  // Step 3: RGB discs with screen onto those black patches
   ctxLight.globalCompositeOperation = 'screen';
   blitDisc(ctxLight, 3, cxL, cyL, angles[3]); // R
   blitDisc(ctxLight, 4, cxL, cyL, angles[4]); // G
@@ -229,18 +237,17 @@ function drawFrame() {
 }
 
 // ── Audio ────────────────────────────────────────────────────────────────────
-let audioCtx = null;
+// Create AudioContext immediately (suspended on mobile until user gesture)
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 const audioOscs = [];
 const BASE_FREQS = [200, 700, 1750];
 
 let audioMaster = null;
+let audioBuilt = false;
 
-function initAudio() {
-  if (audioCtx) return;
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume().catch(err => console.warn('AudioContext resume failed:', err));
-  }
+function buildAudioGraph() {
+  if (audioBuilt) return;
+  audioBuilt = true;
   const master = audioCtx.createGain();
   master.gain.setValueAtTime(0, audioCtx.currentTime);
   master.gain.linearRampToValueAtTime(0.4, audioCtx.currentTime + 1);
@@ -267,8 +274,16 @@ function initAudio() {
     gainNode.connect(master);
 
     osc.start(); lfo.start();
-    audioOscs.push({ osc, lfo });
+    audioOscs.push({ osc, lfo, gainNode });
   });
+}
+
+function initAudio() {
+  // Must call resume() directly in the user-gesture handler (no await in between)
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+  buildAudioGraph();
 }
 
 // ── Input ────────────────────────────────────────────────────────────────────
@@ -280,13 +295,17 @@ let started = false;
 function startExperience() {
   if (started) return;
   started = true;
-  const el = document.documentElement;
-  const req = el.requestFullscreen || el.webkitRequestFullscreen;
-  if (!req) console.warn('Fullscreen API not available in this browser/webview.');
-  else req.call(el).catch(err => console.warn('Fullscreen request failed:', err));
+  // Chrome Android: use body (not documentElement), pass navigationUI hint
+  const el = document.body;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
+  if (req) req.call(el, { navigationUI: 'hide' }).catch(() => {});
   initAudio();
   requestAnimationFrame(render);
 }
+
+// Re-measure after fullscreen transition completes
+document.addEventListener('fullscreenchange', resize);
+document.addEventListener('webkitfullscreenchange', resize);
 
 function isInsideCircle(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
@@ -309,14 +328,28 @@ function isInsideSquare(clientX, clientY) {
   return x >= sx && x <= sx + sw && y >= sy && y <= sy + sh;
 }
 
-let paused = false;
+let pausedDark  = false; // CMY / quadrado
+let pausedLight = false; // RGB / círculo
 
-function togglePause() {
-  paused = !paused;
-  if (audioCtx && audioMaster) {
-    const target = paused ? 0 : 0.4;
-    audioMaster.gain.cancelScheduledValues(audioCtx.currentTime);
-    audioMaster.gain.linearRampToValueAtTime(target, audioCtx.currentTime + 0.2);
+function togglePauseDark() {
+  pausedDark = !pausedDark;
+  // quadrado controla o oscilador médio (índice 1, 700 Hz)
+  if (audioBuilt) {
+    const g = audioOscs[1].gainNode;
+    const target = pausedDark ? 0 : 0.33;
+    g.gain.cancelScheduledValues(audioCtx.currentTime);
+    g.gain.linearRampToValueAtTime(target, audioCtx.currentTime + 0.2);
+  }
+}
+
+function togglePauseLight() {
+  pausedLight = !pausedLight;
+  // círculo controla o oscilador agudo (índice 2, 1750 Hz)
+  if (audioBuilt) {
+    const g = audioOscs[2].gainNode;
+    const target = pausedLight ? 0 : 0.33;
+    g.gain.cancelScheduledValues(audioCtx.currentTime);
+    g.gain.linearRampToValueAtTime(target, audioCtx.currentTime + 0.2);
   }
 }
 
@@ -377,18 +410,18 @@ canvas.addEventListener('pointermove', e => {
   const dx = e.clientX - lastX;
   const dy = e.clientY - lastY;
   if (Math.abs(dy) > Math.abs(dx)) {
-    const impulse = (-dy / canvas.height) * 0.5 * (16 / dt);
-    velocity = dy > 0 ? -Math.abs(velocity || impulse) : velocity + impulse;
+    velocity += (-dy / canvas.height) * 0.5 * (16 / dt);
   } else {
-    velocity = (dx / canvas.width) * 0.5 * (16 / dt);
+    velocity += (dx / canvas.width) * 0.5 * (16 / dt);
   }
   lastX = e.clientX; lastY = e.clientY; lastT = now;
 });
 canvas.addEventListener('pointerup', e => {
   const dt = performance.now() - (downTime || 0);
   const dist = Math.hypot(e.clientX - (downX || e.clientX), e.clientY - (downY || e.clientY));
-  if (dt < 300 && dist < 10 && isInsideSquare(e.clientX, e.clientY)) {
-    togglePause();
+  if (dt < 300 && dist < 10) {
+    if (isInsideSquare(e.clientX, e.clientY)) togglePauseDark();
+    else if (isInsideCircle(e.clientX, e.clientY)) togglePauseLight();
   }
   lastX = null; lastY = null;
 });
@@ -404,12 +437,20 @@ function render(now) {
   if (now - lastFrameTime < FRAME_INTERVAL) return;
   lastFrameTime = now;
 
-  if (paused) return;
+  // Each system can be paused independently
+  const bothPaused = pausedDark && pausedLight;
+  if (!bothPaused) {
+    velocity *= friction;
+  }
+  if (!pausedDark)  { angles[0] += ALL_SPEEDS[0] + velocity * ALL_VEL_MULT[0];
+                      angles[1] += ALL_SPEEDS[1] + velocity * ALL_VEL_MULT[1];
+                      angles[2] += ALL_SPEEDS[2] + velocity * ALL_VEL_MULT[2]; }
+  if (!pausedLight) { angles[3] += ALL_SPEEDS[3] + velocity * ALL_VEL_MULT[3];
+                      angles[4] += ALL_SPEEDS[4] + velocity * ALL_VEL_MULT[4];
+                      angles[5] += ALL_SPEEDS[5] + velocity * ALL_VEL_MULT[5]; }
+  if (bothPaused) return;
 
-  velocity *= friction;
-  angles.forEach((_, i) => { angles[i] += ALL_SPEEDS[i] + velocity * ALL_VEL_MULT[i]; });
-
-  if (audioCtx) {
+  if (audioBuilt) {
     const speed = Math.abs(velocity);
     audioOscs.forEach(({ lfo, osc }, i) => {
       lfo.frequency.value = (0.30 + i * 0.01) + speed * 6;
