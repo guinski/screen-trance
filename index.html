@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Screen Trance</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: none;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #stage { position: relative; background: #000; }
+  canvas { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const TAU = Math.PI * 2;
+
+// Offscreen: black-side system (CMY, multiply, aligns to black)
+const offBlack = document.createElement('canvas');
+const ctxBlack = offBlack.getContext('2d');
+// Offscreen: white-side system (RGB, screen, aligns to white)
+const offWhite = document.createElement('canvas');
+const ctxWhite = offWhite.getContext('2d');
+// Alpha masks: which screen region belongs to each side
+const maskWhite = document.createElement('canvas'); // white face area + circle eye
+const mWhite = maskWhite.getContext('2d');
+const maskBlack = document.createElement('canvas'); // dark staircase area + square eye
+const mBlack = maskBlack.getContext('2d');
+
+// Phone aspect ratio, matched to the original reference artwork (420x737 ~ 9:16)
+const PHONE_ASPECT = 420 / 737;
+const stage = document.getElementById('stage');
+
+function resize() {
+  const winW = window.innerWidth, winH = window.innerHeight;
+  let w = winW, h = winW / PHONE_ASPECT;
+  if (h > winH) { h = winH; w = winH * PHONE_ASPECT; }
+
+  stage.style.width = w + 'px';
+  stage.style.height = h + 'px';
+
+  [canvas, offBlack, offWhite, maskWhite, maskBlack].forEach(cv => { cv.width = w; cv.height = h; });
+  buildMasks();
+  if (typeof drawFrame === 'function') drawFrame();
+}
+
+const F = {
+  circleX: 0.7810, circleY: 0.4118, circleR: 0.0976,
+  sqX: 0.1286, sqY: 0.3568, sqW: 0.1929, sqH: 0.1099,
+  // staircase: 3 vertical steps measured from the reference image
+  step1X: 0.7774, step1YEnd: 0.2978,
+  step2X: 0.5500, step2YEnd: 0.6696,
+  step3X: 0.3690,
+};
+
+function drawStaircasePath(c, W, H) {
+  c.beginPath();
+  c.moveTo(W * F.step1X, 0);
+  c.lineTo(W, 0);
+  c.lineTo(W, H);
+  c.lineTo(W * F.step3X, H);
+  c.lineTo(W * F.step3X, H * F.step2YEnd);
+  c.lineTo(W * F.step2X, H * F.step2YEnd);
+  c.lineTo(W * F.step2X, H * F.step1YEnd);
+  c.lineTo(W * F.step1X, H * F.step1YEnd);
+  c.closePath();
+}
+
+function buildMasks() {
+  const W = maskWhite.width, H = maskWhite.height;
+
+  // White region: starts as full white, cut out the dark staircase + the square eye,
+  // then re-add the circle eye (white island inside the cut zone).
+  mWhite.clearRect(0, 0, W, H);
+  mWhite.fillStyle = '#fff';
+  mWhite.fillRect(0, 0, W, H);
+  mWhite.globalCompositeOperation = 'destination-out';
+  drawStaircasePath(mWhite, W, H);
+  mWhite.fill();
+  mWhite.fillRect(W * F.sqX, H * F.sqY, W * F.sqW, H * F.sqH);
+  mWhite.globalCompositeOperation = 'source-over';
+  mWhite.beginPath();
+  mWhite.arc(W * F.circleX, H * F.circleY, W * F.circleR, 0, TAU);
+  mWhite.fillStyle = '#fff';
+  mWhite.fill();
+
+  // Black region = exact inverse of white region (full canvas minus whiteMask shape)
+  mBlack.clearRect(0, 0, W, H);
+  mBlack.fillStyle = '#fff';
+  mBlack.fillRect(0, 0, W, H);
+  mBlack.globalCompositeOperation = 'destination-out';
+  mBlack.drawImage(maskWhite, 0, 0);
+  mBlack.globalCompositeOperation = 'source-over';
+}
+
+const N = 24;
+const TOTAL = N * 3;
+const ARM_W = TAU / TOTAL;
+
+const CMY_COLORS = ['#00ffff', '#ff00ff', '#ffff00'];
+const CMY_SPEEDS = [0.00750, 0.00728, 0.00773];
+const RGB_COLORS = ['#ff0000', '#00ff00', '#0000ff'];
+const RGB_SPEEDS = [-0.00773, -0.00728, -0.00750];
+
+const CMY_VEL_MULT = [0.85, 1.00, 1.15]; // C, M, Y react differently to swipe
+const RGB_VEL_MULT = [1.20, 0.90, 1.00]; // R, G, B — R reacts most, matching R being the odd one out
+
+function makeGroups(colors, speeds, velMult) {
+  // All 3 colors start at the SAME angle (fully overlapping), so multiply/screen
+  // of all 3 stacked together gives a solid black/white at rest.
+  return colors.map((color, ci) => ({ color, speed: speeds[ci], velMult: velMult[ci], angle: 0 }));
+}
+
+const blackGroups = makeGroups(CMY_COLORS, CMY_SPEEDS, CMY_VEL_MULT); // dark side + square eye, multiply -> black
+const whiteGroups = makeGroups(RGB_COLORS, RGB_SPEEDS, RGB_VEL_MULT); // light side + circle eye, screen -> white
+
+let velocity = 0;
+const friction = 0.96;
+let lastX = null, lastY = null, lastT = null;
+
+let audioCtx = null;
+const audioOscs = [];
+const BASE_FREQS = [200, 700, 1750];
+const OSC_TYPES = ['sine', 'sine', 'sine'];
+const OSC_GAINS = [0.33, 0.33, 0.33];
+const FILTER_MULT = [8.0, 8.0, 8.0]; // effectively no filtering needed for sine
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const master = audioCtx.createGain();
+  master.gain.setValueAtTime(0, audioCtx.currentTime);
+  master.gain.linearRampToValueAtTime(0.4, audioCtx.currentTime + 1);
+  master.connect(audioCtx.destination);
+
+  BASE_FREQS.forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    osc.type = OSC_TYPES[i];
+    osc.frequency.value = freq;
+
+    const lfo = audioCtx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.50 + i * 0.01;
+
+    const lfoGain = audioCtx.createGain();
+    lfoGain.gain.value = 20;
+
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = freq * FILTER_MULT[i];
+    filter.Q.value = 0.7;
+
+    const gainNode = audioCtx.createGain();
+    gainNode.gain.value = OSC_GAINS[i];
+    osc.connect(filter);
+    filter.connect(gainNode);
+    gainNode.connect(master);
+
+    osc.start();
+    lfo.start();
+    audioOscs.push({ osc, lfo, gainNode, filter });
+  });
+}
+
+function requestFullscreen() {
+  const el = document.documentElement;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+  if (req) req.call(el).catch(() => {});
+}
+
+function isInsideCircle(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (clientX - rect.left) * scaleX;
+  const y = (clientY - rect.top) * scaleY;
+  const cx = canvas.width * F.circleX, cy = canvas.height * F.circleY, r = canvas.width * F.circleR;
+  return Math.hypot(x - cx, y - cy) <= r;
+}
+
+let tapCount = 0, lastTapTime = 0;
+const TAP_WINDOW = 600; // ms between taps to still count as a multi-tap
+
+canvas.addEventListener('pointerdown', e => {
+  startExperience();
+
+  if (isInsideCircle(e.clientX, e.clientY)) {
+    const now = performance.now();
+    tapCount = (now - lastTapTime < TAP_WINDOW) ? tapCount + 1 : 1;
+    lastTapTime = now;
+    if (tapCount >= 3) {
+      tapCount = 0;
+      captureHighRes();
+    }
+  }
+
+  lastX = e.clientX; lastY = e.clientY; lastT = performance.now();
+});
+canvas.addEventListener('pointermove', e => {
+  if (lastX === null) return;
+  const now = performance.now();
+  const dt = Math.max(now - lastT, 1);
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+
+  if (Math.abs(dy) > Math.abs(dx)) {
+    const impulse = (-dy / canvas.height) * 0.5 * (16 / dt);
+    if (dy > 0) {
+      velocity = -Math.abs(velocity || impulse);
+    } else {
+      velocity += impulse;
+    }
+  } else {
+    velocity = (dx / canvas.width) * 0.5 * (16 / dt);
+  }
+
+  lastX = e.clientX; lastY = e.clientY; lastT = now;
+});
+canvas.addEventListener('pointerup', () => { lastX = null; lastY = null; });
+canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
+canvas.addEventListener('touchmove',  e => e.preventDefault(), { passive: false });
+
+function armPath(c, cx, cy, k, steps, sa) {
+  c.beginPath();
+  for (let s = 0; s <= steps; s++) {
+    const theta = (s / steps) * TAU;
+    const r = Math.exp(k * theta) - 1;
+    const a = sa + theta;
+    s === 0 ? c.moveTo(cx + r * Math.cos(a), cy + r * Math.sin(a))
+            : c.lineTo(cx + r * Math.cos(a), cy + r * Math.sin(a));
+  }
+  for (let s = steps; s >= 0; s--) {
+    const theta = (s / steps) * TAU;
+    const r = Math.exp(k * theta) - 1;
+    const a = sa + ARM_W + theta;
+    c.lineTo(cx + r * Math.cos(a), cy + r * Math.sin(a));
+  }
+  c.closePath();
+}
+
+// twinColor: drawn behind each arm before the colored blend pass. For multiply
+// (black side) twins are white so colors multiply correctly; for screen (white
+// side) twins are black so colors screen correctly. Gaps between arms keep the
+// canvas's own base fill, which must match the "aligned" rest color.
+function drawSpirals(c, cx, cy, maxR, groups, blendMode, twinColor) {
+  const steps = 60;
+  const k = Math.log(maxR + 1) / TAU;
+
+  if (twinColor) {
+    c.globalCompositeOperation = 'source-over';
+    groups.forEach(g => {
+      for (let i = 0; i < N; i++) {
+        const sa = g.angle + i * (TAU / N);
+        armPath(c, cx, cy, k, steps, sa);
+        c.fillStyle = twinColor;
+        c.fill();
+      }
+    });
+  }
+
+  c.globalCompositeOperation = blendMode;
+  groups.forEach(g => {
+    for (let i = 0; i < N; i++) {
+      const sa = g.angle + i * (TAU / N);
+      armPath(c, cx, cy, k, steps, sa);
+      c.fillStyle = g.color;
+      c.fill();
+    }
+  });
+
+  c.globalCompositeOperation = 'source-over';
+}
+
+function drawFrame() {
+  const W = canvas.width, H = canvas.height;
+
+  // Both systems must cover the WHOLE canvas (since their visible area is now
+  // defined entirely by the mask, not by their own size), each from its own eye center.
+  const cxR = W * F.circleX, cyR = H * F.circleY;
+  const maxRFromCircle = Math.sqrt(Math.max(cxR, W - cxR) ** 2 + Math.max(cyR, H - cyR) ** 2) * 1.05;
+
+  const sqX = W * F.sqX, sqY = H * F.sqY, sqW = W * F.sqW, sqH = H * F.sqH;
+  const cxL = sqX + sqW / 2, cyL = sqY + sqH / 2;
+  const maxRFromSquare = Math.sqrt(Math.max(cxL, W - cxL) ** 2 + Math.max(cyL, H - cyL) ** 2) * 1.05;
+
+  // Black-side system: CMY, multiply (white twins), centered on the square eye.
+  // Base fill black -> gaps between arms stay black at rest.
+  ctxBlack.fillStyle = '#000';
+  ctxBlack.fillRect(0, 0, W, H);
+  drawSpirals(ctxBlack, cxL, cyL, maxRFromSquare, blackGroups, 'multiply', '#fff');
+  ctxBlack.globalCompositeOperation = 'destination-in';
+  ctxBlack.drawImage(maskBlack, 0, 0);
+  ctxBlack.globalCompositeOperation = 'source-over';
+
+  // White-side system: RGB, screen (black twins), centered on the circle eye.
+  // Base fill white -> gaps between arms stay white at rest.
+  ctxWhite.fillStyle = '#fff';
+  ctxWhite.fillRect(0, 0, W, H);
+  drawSpirals(ctxWhite, cxR, cyR, maxRFromCircle, whiteGroups, 'screen', '#000');
+  ctxWhite.globalCompositeOperation = 'destination-in';
+  ctxWhite.drawImage(maskWhite, 0, 0);
+  ctxWhite.globalCompositeOperation = 'source-over';
+
+  // Compose: both regions tile the whole screen with no overlap
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(offBlack, 0, 0);
+  ctx.drawImage(offWhite, 0, 0);
+
+  // Safety net: force the round eye to always show the white/RGB system,
+  // regardless of any mask antialiasing edge issues.
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cxR, cyR, W * F.circleR, 0, TAU);
+  ctx.clip();
+  ctx.drawImage(offWhite, 0, 0);
+  ctx.restore();
+}
+
+const FRAME_INTERVAL = 1000 / 24;
+let lastFrameTime = 0;
+let started = false;
+
+function render(now) {
+  requestAnimationFrame(render);
+  if (now - lastFrameTime < FRAME_INTERVAL) return;
+  lastFrameTime = now;
+
+  velocity *= friction;
+  blackGroups.forEach(g => g.angle += g.speed + velocity * g.velMult);
+  whiteGroups.forEach(g => g.angle += g.speed + velocity * g.velMult);
+
+  if (audioCtx) {
+    const speed = Math.abs(velocity);
+    audioOscs.forEach(({ lfo, osc, filter }, i) => {
+      lfo.frequency.value = (0.50 + i * 0.01) + speed * 6;
+      const f = BASE_FREQS[i] * (1 + speed * 0.6);
+      osc.frequency.value = f;
+      filter.frequency.value = f * FILTER_MULT[i];
+    });
+  }
+
+  drawFrame();
+}
+
+function startExperience() {
+  if (started) return;
+  started = true;
+  requestFullscreen();
+  initAudio();
+  lastFrameTime = 0;
+  requestAnimationFrame(render);
+}
+
+function captureHighRes() {
+  const targetW = 1080;
+  const targetH = Math.round(targetW / PHONE_ASPECT);
+  const prevW = canvas.width, prevH = canvas.height;
+
+  [canvas, offBlack, offWhite, maskWhite, maskBlack].forEach(cv => { cv.width = targetW; cv.height = targetH; });
+  buildMasks();
+  drawFrame();
+
+  canvas.toBlob(blob => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'screen-trance-' + Date.now() + '.png';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }, 'image/png');
+
+  // Restore normal display resolution
+  [canvas, offBlack, offWhite, maskWhite, maskBlack].forEach(cv => { cv.width = prevW; cv.height = prevH; });
+  buildMasks();
+  drawFrame();
+}
+
+resize();
+window.addEventListener('resize', resize);
+drawFrame(); // static initial frame — animation/sound/fullscreen start on first touch
+</script>
+</body>
+</html>
