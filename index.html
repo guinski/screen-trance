@@ -237,8 +237,7 @@ function drawFrame() {
 }
 
 // ── Audio ────────────────────────────────────────────────────────────────────
-// Create AudioContext immediately (suspended on mobile until user gesture)
-const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let audioCtx = null;
 const audioOscs = [];
 const BASE_FREQS = [200, 700, 1750];
 
@@ -279,7 +278,9 @@ function buildAudioGraph() {
 }
 
 function initAudio() {
-  // Must call resume() directly in the user-gesture handler (no await in between)
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
   if (audioCtx.state === 'suspended') {
     audioCtx.resume();
   }
@@ -295,10 +296,9 @@ let started = false;
 function startExperience() {
   if (started) return;
   started = true;
-  // Chrome Android: use body (not documentElement), pass navigationUI hint
-  const el = document.body;
+  const el = document.documentElement;
   const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
-  if (req) req.call(el, { navigationUI: 'hide' }).catch(() => {});
+  if (req) req.call(el).catch(() => {});
   initAudio();
   requestAnimationFrame(render);
 }
@@ -334,7 +334,7 @@ let pausedLight = false; // RGB / círculo
 function togglePauseDark() {
   pausedDark = !pausedDark;
   // quadrado controla o oscilador médio (índice 1, 700 Hz)
-  if (audioBuilt) {
+  if (audioBuilt && audioCtx) {
     const g = audioOscs[1].gainNode;
     const target = pausedDark ? 0 : 0.33;
     g.gain.cancelScheduledValues(audioCtx.currentTime);
@@ -345,7 +345,7 @@ function togglePauseDark() {
 function togglePauseLight() {
   pausedLight = !pausedLight;
   // círculo controla o oscilador agudo (índice 2, 1750 Hz)
-  if (audioBuilt) {
+  if (audioBuilt && audioCtx) {
     const g = audioOscs[2].gainNode;
     const target = pausedLight ? 0 : 0.33;
     g.gain.cancelScheduledValues(audioCtx.currentTime);
@@ -391,16 +391,7 @@ let downX = null, downY = null, downTime = null;
 
 canvas.addEventListener('pointerdown', e => {
   startExperience();
-
   downX = e.clientX; downY = e.clientY; downTime = performance.now();
-
-  if (isInsideCircle(e.clientX, e.clientY)) {
-    const now = performance.now();
-    tapCount = (now - lastTapTime < TAP_WINDOW) ? tapCount + 1 : 1;
-    lastTapTime = now;
-    if (tapCount >= 3) { tapCount = 0; captureHighRes(); }
-  }
-
   lastX = e.clientX; lastY = e.clientY; lastT = performance.now();
 });
 canvas.addEventListener('pointermove', e => {
@@ -420,8 +411,19 @@ canvas.addEventListener('pointerup', e => {
   const dt = performance.now() - (downTime || 0);
   const dist = Math.hypot(e.clientX - (downX || e.clientX), e.clientY - (downY || e.clientY));
   if (dt < 300 && dist < 10) {
-    if (isInsideSquare(e.clientX, e.clientY)) togglePauseDark();
-    else if (isInsideCircle(e.clientX, e.clientY)) togglePauseLight();
+    if (isInsideSquare(e.clientX, e.clientY)) {
+      togglePauseDark();
+    } else if (isInsideCircle(e.clientX, e.clientY)) {
+      const now = performance.now();
+      tapCount = (now - lastTapTime < TAP_WINDOW) ? tapCount + 1 : 1;
+      lastTapTime = now;
+      if (tapCount >= 3) {
+        tapCount = 0;
+        captureHighRes();
+      } else {
+        togglePauseLight();
+      }
+    }
   }
   lastX = null; lastY = null;
 });
@@ -450,7 +452,7 @@ function render(now) {
                       angles[5] += ALL_SPEEDS[5] + velocity * ALL_VEL_MULT[5]; }
   if (bothPaused) return;
 
-  if (audioBuilt) {
+  if (audioBuilt && audioCtx) {
     const speed = Math.abs(velocity);
     audioOscs.forEach(({ lfo, osc }, i) => {
       lfo.frequency.value = (0.30 + i * 0.01) + speed * 6;
