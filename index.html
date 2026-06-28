@@ -133,10 +133,10 @@ const CMY = ['#00ffff', '#ff00ff', '#ffff00'];
 const RGB = ['#ff0000', '#00ff00', '#0000ff'];
 
 // Speeds: very close together for slow phase
-const CMY_SPEEDS = [ 0.00750,  0.00728,  0.00773];
-const RGB_SPEEDS = [-0.00773, -0.00728, -0.00750];
+const CMY_SPEEDS = [ 0.0140,  0.01395, 0.01405];
+const RGB_SPEEDS = [-0.01405,-0.01395,-0.0140];
 const ALL_SPEEDS = [...CMY_SPEEDS, ...RGB_SPEEDS];
-const ALL_VEL_MULT = [0.85, 1.00, 1.15, 1.20, 0.90, 1.00]; // C,M,Y,R,G,B
+const ALL_VEL_MULT = [0.98, 1.00, 1.02, 1.02, 1.00, 0.98]; // C,M,Y,R,G,B
 
 // All start at 0 = fully aligned = black (CMY) / white (RGB)
 const angles = [0, 0, 0, 0, 0, 0];
@@ -248,8 +248,8 @@ const PAN_DEPTH    = 0.9;  // 0–1 stereo width
 
 let audioMaster = null;
 let audioBuilt  = false;
-let panAngle    = 0;   // pan follows spiral
-let lfoAngle    = 0;   // pitch LFO angle, rate driven by swipe
+let panAngleCMY = 0;   // 500 Hz follows CMY spiral (positive)
+let panAngleRGB = 0;   // 600 Hz follows RGB spiral (negative)
 
 function buildAudioGraph() {
   if (audioBuilt) return;
@@ -294,26 +294,28 @@ function initAudio() {
 function updateAudio() {
   if (!audioBuilt || !audioCtx) return;
 
-  const speed  = Math.abs(velocity);
-  const panDir = velocity < 0 ? -1 : 1;
+  // Each oscillator follows its own spiral
+  // CMY (index 0, 500 Hz): positive direction
+  // RGB (index 1, 600 Hz): negative direction
+  panAngleCMY += ALL_SPEEDS[0] + velocityDark  * ALL_VEL_MULT[0];
+  panAngleRGB += ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3];
 
-  // Pan: follows spiral angle, same direction
-  panAngle += panDir * (ALL_SPEEDS[0] + speed * ALL_VEL_MULT[0]);
-  const panVal = Math.cos(panAngle) * PAN_DEPTH;
+  const panCMY   = Math.cos(panAngleCMY) * PAN_DEPTH;
+  const pitchCMY = Math.sin(panAngleCMY) * PITCH_DEPTH;
 
-  // Pitch LFO: own angle, rate 0.3 Hz rest → 20 Hz full swipe
-  const lfoHz = 0.3 + Math.min(speed * 120, 19.7);
-  lfoAngle += lfoHz * (1 / 24) * Math.PI * 2;
-  const pitchMod = Math.sin(lfoAngle) * PITCH_DEPTH;
+  const panRGB   = Math.cos(panAngleRGB) * PAN_DEPTH;
+  const pitchRGB = Math.sin(panAngleRGB) * PITCH_DEPTH;
 
-  audioOscs.forEach(({ osc, panner, baseFreq }) => {
-    panner.pan.setTargetAtTime(panVal, audioCtx.currentTime, 0.008);
-    osc.frequency.setTargetAtTime(baseFreq + pitchMod, audioCtx.currentTime, 0.008);
-  });
+  audioOscs[0].panner.pan.setTargetAtTime(panCMY, audioCtx.currentTime, 0.008);
+  audioOscs[0].osc.frequency.setTargetAtTime(audioOscs[0].baseFreq + pitchCMY, audioCtx.currentTime, 0.008);
+
+  audioOscs[1].panner.pan.setTargetAtTime(panRGB, audioCtx.currentTime, 0.008);
+  audioOscs[1].osc.frequency.setTargetAtTime(audioOscs[1].baseFreq + pitchRGB, audioCtx.currentTime, 0.008);
 }
 
 // ── Input ────────────────────────────────────────────────────────────────────
-let velocity = 0;
+let velocityDark  = 0; // CMY / quadrado
+let velocityLight = 0; // RGB / círculo
 const friction = 0.96;
 let lastX = null, lastY = null, lastT = null;
 let started = false;
@@ -371,7 +373,36 @@ function togglePauseLight() {
 }
 
 let tapCount = 0, lastTapTime = 0;
+let tapCountSq = 0, lastTapTimeSq = 0;
 const TAP_WINDOW = 600;
+
+function resetExperience() {
+  // stop audio
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  audioBuilt = false;
+  audioOscs.length = 0;
+  audioMaster = null;
+
+  // reset angles and velocities
+  angles.fill(0);
+  velocityDark = 0; velocityLight = 0;
+  panAngleCMY = 0; panAngleRGB = 0;
+
+  // reset state
+  started = false;
+  pausedDark = false; pausedLight = false;
+
+  // show overlay again
+  const ov = document.getElementById('overlay');
+  if (ov) ov.style.display = '';
+
+  // cancel render loop — overlay tap will restart it
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  lastFrameTime = 0;
+  // draw static frame so screen isn't blank while waiting
+  angles.fill(0);
+  drawFrame();
+}
 
 function captureHighRes() {
   const targetW = 1080;
@@ -406,8 +437,9 @@ function captureHighRes() {
 
 let downX = null, downY = null, downTime = null;
 
-// Overlay captures the very first touch — guaranteed user gesture for fullscreen + audio
+// Overlay captures first touch after load or reset
 document.getElementById('overlay').addEventListener('pointerdown', e => {
+  if (started) return;
   started = true;
   document.getElementById('overlay').style.display = 'none';
 
@@ -419,13 +451,14 @@ document.getElementById('overlay').addEventListener('pointerdown', e => {
   if (audioCtx.state === 'suspended') audioCtx.resume();
   buildAudioGraph();
 
-  requestAnimationFrame(render);
-
-  // don't pass initial touch as swipe — reset tracking state
+  // reset tracking state
   downX = null; downY = null; downTime = null;
   lastX = null; lastY = null; lastT = null;
-  velocity = 0;
-}, { once: true });
+  velocityDark = 0; velocityLight = 0;
+  lastFrameTime = 0;
+
+  rafId = requestAnimationFrame(render);
+});
 
 canvas.addEventListener('pointerdown', e => {
   if (!started) return;
@@ -438,11 +471,27 @@ canvas.addEventListener('pointermove', e => {
   const dt = Math.max(now - lastT, 1);
   const dx = e.clientX - lastX;
   const dy = e.clientY - lastY;
+
+  const rect = canvas.getBoundingClientRect();
+  const xNorm = (e.clientX - rect.left) / rect.width; // 0=left, 1=right
+
+  let impulse;
   if (Math.abs(dy) > Math.abs(dx)) {
-    velocity += (-dy / canvas.height) * 0.5 * (16 / dt);
+    impulse = (-dy / canvas.height) * 0.5 * (16 / dt);
   } else {
-    velocity += (dx / canvas.width) * 0.5 * (16 / dt);
+    impulse = (dx / canvas.width) * 0.5 * (16 / dt);
   }
+
+  // Three zones: left third → RGB only, middle third → both, right third → CMY only
+  if (xNorm < 0.333) {
+    velocityLight += impulse;
+  } else if (xNorm > 0.667) {
+    velocityDark += impulse;
+  } else {
+    velocityDark  += impulse;
+    velocityLight += impulse;
+  }
+
   lastX = e.clientX; lastY = e.clientY; lastT = now;
 });
 canvas.addEventListener('pointerup', e => {
@@ -450,7 +499,15 @@ canvas.addEventListener('pointerup', e => {
   const dist = Math.hypot(e.clientX - (downX || e.clientX), e.clientY - (downY || e.clientY));
   if (dt < 300 && dist < 10) {
     if (isInsideSquare(e.clientX, e.clientY)) {
-      togglePauseDark();
+      const now = performance.now();
+      tapCountSq = (now - lastTapTimeSq < TAP_WINDOW) ? tapCountSq + 1 : 1;
+      lastTapTimeSq = now;
+      if (tapCountSq >= 3) {
+        tapCountSq = 0;
+        resetExperience();
+      } else {
+        togglePauseDark();
+      }
     } else if (isInsideCircle(e.clientX, e.clientY)) {
       const now = performance.now();
       tapCount = (now - lastTapTime < TAP_WINDOW) ? tapCount + 1 : 1;
@@ -474,23 +531,23 @@ canvas.addEventListener('touchmove', e => e.preventDefault(), { passive: false }
 // ── Render loop ───────────────────────────────────────────────────────────────
 const FRAME_INTERVAL = 1000 / 24;
 let lastFrameTime = 0;
+let rafId = null;
 
 function render(now) {
-  requestAnimationFrame(render);
+  rafId = requestAnimationFrame(render);
   if (now - lastFrameTime < FRAME_INTERVAL) return;
   lastFrameTime = now;
 
   // Each system can be paused independently
   const bothPaused = pausedDark && pausedLight;
-  if (!bothPaused) {
-    velocity *= friction;
-  }
-  if (!pausedDark)  { angles[0] += ALL_SPEEDS[0] + velocity * ALL_VEL_MULT[0];
-                      angles[1] += ALL_SPEEDS[1] + velocity * ALL_VEL_MULT[1];
-                      angles[2] += ALL_SPEEDS[2] + velocity * ALL_VEL_MULT[2]; }
-  if (!pausedLight) { angles[3] += ALL_SPEEDS[3] + velocity * ALL_VEL_MULT[3];
-                      angles[4] += ALL_SPEEDS[4] + velocity * ALL_VEL_MULT[4];
-                      angles[5] += ALL_SPEEDS[5] + velocity * ALL_VEL_MULT[5]; }
+  velocityDark  *= friction;
+  velocityLight *= friction;
+  if (!pausedDark)  { angles[0] += ALL_SPEEDS[0] + velocityDark  * ALL_VEL_MULT[0];
+                      angles[1] += ALL_SPEEDS[1] + velocityDark  * ALL_VEL_MULT[1];
+                      angles[2] += ALL_SPEEDS[2] + velocityDark  * ALL_VEL_MULT[2]; }
+  if (!pausedLight) { angles[3] += ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3];
+                      angles[4] += ALL_SPEEDS[4] + velocityLight * ALL_VEL_MULT[4];
+                      angles[5] += ALL_SPEEDS[5] + velocityLight * ALL_VEL_MULT[5]; }
   if (bothPaused) return;
 
   updateAudio();
