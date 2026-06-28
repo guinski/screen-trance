@@ -421,9 +421,10 @@ document.getElementById('overlay').addEventListener('pointerdown', e => {
 
   requestAnimationFrame(render);
 
-  // pass through to canvas handlers
-  downX = e.clientX; downY = e.clientY; downTime = performance.now();
-  lastX = e.clientX; lastY = e.clientY; lastT = performance.now();
+  // don't pass initial touch as swipe — reset tracking state
+  downX = null; downY = null; downTime = null;
+  lastX = null; lastY = null; lastT = null;
+  velocity = 0;
 }, { once: true });
 
 canvas.addEventListener('pointerdown', e => {
