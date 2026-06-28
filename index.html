@@ -238,18 +238,25 @@ function drawFrame() {
 
 // ── Audio ────────────────────────────────────────────────────────────────────
 let audioCtx = null;
-const audioOscs = [];
-const BASE_FREQS = [200, 700, 1750];
+const audioOscs = []; // { osc, panner, gainNode, baseFreq }
+const BASE_FREQS = [500, 600];
+
+// Leslie Doppler params — rotor IS the spiral angle
+const PITCH_DEPTH  = 40;   // Hz deviation around base
+const PAN_DEPTH    = 0.9;  // 0–1 stereo width
 
 let audioMaster = null;
-let audioBuilt = false;
+let audioBuilt  = false;
+let panAngle    = 0;   // pan follows spiral
+let lfoAngle    = 0;   // pitch LFO angle, rate driven by swipe
 
 function buildAudioGraph() {
   if (audioBuilt) return;
   audioBuilt = true;
+
   const master = audioCtx.createGain();
   master.gain.setValueAtTime(0, audioCtx.currentTime);
-  master.gain.linearRampToValueAtTime(0.4, audioCtx.currentTime + 1);
+  master.gain.linearRampToValueAtTime(0.6, audioCtx.currentTime + 1);
   master.connect(audioCtx.destination);
   audioMaster = master;
 
@@ -258,22 +265,18 @@ function buildAudioGraph() {
     osc.type = 'sine';
     osc.frequency.value = freq;
 
-    const lfo = audioCtx.createOscillator();
-    lfo.type = 'sine';
-    lfo.frequency.value = 0.30 + i * 0.01;
-
-    const lfoGain = audioCtx.createGain();
-    lfoGain.gain.value = 20;
-    lfo.connect(lfoGain);
-    lfoGain.connect(osc.frequency);
+    const panner = audioCtx.createStereoPanner();
+    panner.pan.value = 0;
 
     const gainNode = audioCtx.createGain();
     gainNode.gain.value = 0.33;
-    osc.connect(gainNode);
-    gainNode.connect(master);
 
-    osc.start(); lfo.start();
-    audioOscs.push({ osc, lfo, gainNode });
+    osc.connect(gainNode);
+    gainNode.connect(panner);
+    panner.connect(master);
+    osc.start();
+
+    audioOscs.push({ osc, panner, gainNode, baseFreq: freq });
   });
 }
 
@@ -287,21 +290,34 @@ function initAudio() {
   buildAudioGraph();
 }
 
+function updateAudio() {
+  if (!audioBuilt || !audioCtx) return;
+
+  const speed  = Math.abs(velocity);
+  const panDir = velocity < 0 ? -1 : 1;
+
+  // Pan: follows spiral angle, same direction
+  panAngle += panDir * (ALL_SPEEDS[0] + speed * ALL_VEL_MULT[0]);
+  const panVal = Math.cos(panAngle) * PAN_DEPTH;
+
+  // Pitch LFO: own angle, rate 0.3 Hz rest → 20 Hz full swipe
+  const lfoHz = 0.3 + Math.min(speed * 120, 19.7);
+  lfoAngle += lfoHz * (1 / 24) * Math.PI * 2;
+  const pitchMod = Math.sin(lfoAngle) * PITCH_DEPTH;
+
+  audioOscs.forEach(({ osc, panner, baseFreq }) => {
+    panner.pan.setTargetAtTime(panVal, audioCtx.currentTime, 0.008);
+    osc.frequency.setTargetAtTime(baseFreq + pitchMod, audioCtx.currentTime, 0.008);
+  });
+}
+
 // ── Input ────────────────────────────────────────────────────────────────────
 let velocity = 0;
 const friction = 0.96;
 let lastX = null, lastY = null, lastT = null;
 let started = false;
 
-function startExperience() {
-  if (started) return;
-  started = true;
-  const el = document.documentElement;
-  const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
-  if (req) req.call(el).catch(() => {});
-  initAudio();
-  requestAnimationFrame(render);
-}
+function startExperience() { /* handled directly in pointerdown */ }
 
 // Re-measure after fullscreen transition completes
 document.addEventListener('fullscreenchange', resize);
@@ -333,9 +349,9 @@ let pausedLight = false; // RGB / círculo
 
 function togglePauseDark() {
   pausedDark = !pausedDark;
-  // quadrado controla o oscilador médio (índice 1, 700 Hz)
+  // quadrado controla oscilador médio (700 Hz)
   if (audioBuilt && audioCtx) {
-    const g = audioOscs[1].gainNode;
+    const g = audioOscs[0].gainNode;
     const target = pausedDark ? 0 : 0.33;
     g.gain.cancelScheduledValues(audioCtx.currentTime);
     g.gain.linearRampToValueAtTime(target, audioCtx.currentTime + 0.2);
@@ -344,9 +360,9 @@ function togglePauseDark() {
 
 function togglePauseLight() {
   pausedLight = !pausedLight;
-  // círculo controla o oscilador agudo (índice 2, 1750 Hz)
+  // círculo controla oscilador agudo (1750 Hz)
   if (audioBuilt && audioCtx) {
-    const g = audioOscs[2].gainNode;
+    const g = audioOscs[1].gainNode;
     const target = pausedLight ? 0 : 0.33;
     g.gain.cancelScheduledValues(audioCtx.currentTime);
     g.gain.linearRampToValueAtTime(target, audioCtx.currentTime + 0.2);
@@ -390,7 +406,20 @@ function captureHighRes() {
 let downX = null, downY = null, downTime = null;
 
 canvas.addEventListener('pointerdown', e => {
-  startExperience();
+  if (!started) {
+    started = true;
+    // fullscreen and AudioContext must be called directly in the event handler
+    // — no intermediate functions — Chrome Android policy
+    const el = document.documentElement;
+    const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
+    if (req) req.call(el).catch(() => {});
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    buildAudioGraph();
+
+    requestAnimationFrame(render);
+  }
   downX = e.clientX; downY = e.clientY; downTime = performance.now();
   lastX = e.clientX; lastY = e.clientY; lastT = performance.now();
 });
@@ -452,13 +481,7 @@ function render(now) {
                       angles[5] += ALL_SPEEDS[5] + velocity * ALL_VEL_MULT[5]; }
   if (bothPaused) return;
 
-  if (audioBuilt && audioCtx) {
-    const speed = Math.abs(velocity);
-    audioOscs.forEach(({ lfo, osc }, i) => {
-      lfo.frequency.value = (0.30 + i * 0.01) + speed * 6;
-      osc.frequency.value = BASE_FREQS[i] * (1 + speed * 0.6);
-    });
-  }
+  updateAudio();
 
   drawFrame();
 }
