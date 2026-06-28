@@ -16,6 +16,7 @@
 </head>
 <body>
 <div id="stage"><canvas id="c"></canvas></div>
+<div id="overlay" style="position:fixed;inset:0;z-index:99;background:transparent;cursor:pointer;-webkit-tap-highlight-color:transparent;"></div>
 <script>
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -405,21 +406,28 @@ function captureHighRes() {
 
 let downX = null, downY = null, downTime = null;
 
+// Overlay captures the very first touch — guaranteed user gesture for fullscreen + audio
+document.getElementById('overlay').addEventListener('pointerdown', e => {
+  started = true;
+  document.getElementById('overlay').style.display = 'none';
+
+  const el = document.documentElement;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
+  if (req) req.call(el).catch(() => {});
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  buildAudioGraph();
+
+  requestAnimationFrame(render);
+
+  // pass through to canvas handlers
+  downX = e.clientX; downY = e.clientY; downTime = performance.now();
+  lastX = e.clientX; lastY = e.clientY; lastT = performance.now();
+}, { once: true });
+
 canvas.addEventListener('pointerdown', e => {
-  if (!started) {
-    started = true;
-    // fullscreen and AudioContext must be called directly in the event handler
-    // — no intermediate functions — Chrome Android policy
-    const el = document.documentElement;
-    const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
-    if (req) req.call(el).catch(() => {});
-
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    buildAudioGraph();
-
-    requestAnimationFrame(render);
-  }
+  if (!started) return;
   downX = e.clientX; downY = e.clientY; downTime = performance.now();
   lastX = e.clientX; lastY = e.clientY; lastT = performance.now();
 });
@@ -456,8 +464,11 @@ canvas.addEventListener('pointerup', e => {
   }
   lastX = null; lastY = null;
 });
-canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
-canvas.addEventListener('touchmove',  e => e.preventDefault(), { passive: false });
+canvas.addEventListener('touchstart', e => {
+  // prevent scroll/zoom but still allow pointerdown to fire
+  if (e.touches.length === 1) e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
 
 // ── Render loop ───────────────────────────────────────────────────────────────
 const FRAME_INTERVAL = 1000 / 24;
