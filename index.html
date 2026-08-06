@@ -7,16 +7,22 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body {
-    width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: none;
+    width: 100%; height: 100%; background: #000; overflow: hidden;
+    touch-action: none;
     display: flex; align-items: center; justify-content: center;
   }
   #stage { position: relative; background: #000; }
   canvas { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  #overlay {
+    position: fixed; inset: 0; z-index: 99;
+    background: transparent; touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
 </style>
 </head>
 <body>
 <div id="stage"><canvas id="c"></canvas></div>
-<div id="overlay" style="position:fixed;inset:0;z-index:99;background:transparent;cursor:pointer;-webkit-tap-highlight-color:transparent;"></div>
+<div id="overlay"></div>
 <script>
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -25,24 +31,15 @@ const TAU = Math.PI * 2;
 const PHONE_ASPECT = 420 / 737;
 const stage = document.getElementById('stage');
 
-// One offscreen per color (6 total) — pre-rendered spiral disc at angle=0
-// At render time we composite them with the correct blend onto system canvases
-const singleDiscs = []; // [C, M, Y, R, G, B] — each is a canvas with transparent bg + colored arms
-
-// System canvases
-const offDark  = document.createElement('canvas'); // CMY system (multiply -> black)
+const singleDiscs = [];
+const offDark  = document.createElement('canvas');
 const ctxDark  = offDark.getContext('2d');
-const offLight = document.createElement('canvas'); // RGB system (screen -> white)  
+const offLight = document.createElement('canvas');
 const ctxLight = offLight.getContext('2d');
-
-// White backing canvas — drawn before CMY so multiply has something to act on
 const offWhiteBg = document.createElement('canvas');
-const ctxWBg = offWhiteBg.getContext('2d');
-
-// Face masks
-const maskLight = document.createElement('canvas'); // white face area
+const maskLight = document.createElement('canvas');
 const mLight    = maskLight.getContext('2d');
-const maskDark  = document.createElement('canvas'); // dark staircase area
+const maskDark  = document.createElement('canvas');
 const mDark     = maskDark.getContext('2d');
 
 const F = {
@@ -55,45 +52,32 @@ const F = {
 
 function drawStaircasePath(c, W, H) {
   c.beginPath();
-  c.moveTo(W * F.step1X, 0);
-  c.lineTo(W, 0);
-  c.lineTo(W, H);
-  c.lineTo(W * F.step3X, H);
-  c.lineTo(W * F.step3X, H * F.step2YEnd);
-  c.lineTo(W * F.step2X, H * F.step2YEnd);
-  c.lineTo(W * F.step2X, H * F.step1YEnd);
-  c.lineTo(W * F.step1X, H * F.step1YEnd);
-  c.closePath();
+  c.moveTo(W * F.step1X, 0); c.lineTo(W, 0); c.lineTo(W, H);
+  c.lineTo(W * F.step3X, H); c.lineTo(W * F.step3X, H * F.step2YEnd);
+  c.lineTo(W * F.step2X, H * F.step2YEnd); c.lineTo(W * F.step2X, H * F.step1YEnd);
+  c.lineTo(W * F.step1X, H * F.step1YEnd); c.closePath();
 }
 
 function buildMasks(W, H) {
   mLight.clearRect(0, 0, W, H);
-  mLight.fillStyle = '#fff';
-  mLight.fillRect(0, 0, W, H);
+  mLight.fillStyle = '#fff'; mLight.fillRect(0, 0, W, H);
   mLight.globalCompositeOperation = 'destination-out';
-  drawStaircasePath(mLight, W, H);
-  mLight.fill();
+  drawStaircasePath(mLight, W, H); mLight.fill();
   mLight.fillRect(W * F.sqX, H * F.sqY, W * F.sqW, H * F.sqH);
   mLight.globalCompositeOperation = 'source-over';
-  mLight.beginPath();
-  mLight.arc(W * F.circleX, H * F.circleY, W * F.circleR, 0, TAU);
-  mLight.fillStyle = '#fff';
-  mLight.fill();
+  mLight.beginPath(); mLight.arc(W * F.circleX, H * F.circleY, W * F.circleR, 0, TAU);
+  mLight.fillStyle = '#fff'; mLight.fill();
 
   mDark.clearRect(0, 0, W, H);
-  mDark.fillStyle = '#fff';
-  mDark.fillRect(0, 0, W, H);
+  mDark.fillStyle = '#fff'; mDark.fillRect(0, 0, W, H);
   mDark.globalCompositeOperation = 'destination-out';
   mDark.drawImage(maskLight, 0, 0);
   mDark.globalCompositeOperation = 'source-over';
 }
 
-// Spiral arms config
 const N = 24;
-const ARM_W = TAU / (N * 3); // 1/72 of circle per arm
+const ARM_W = TAU / (N * 3);
 
-// Build a single-color spiral disc, transparent background, colored arms only
-// Size = 2*r x 2*r, center at r,r
 function buildDisc(color, r) {
   const size = Math.ceil(r * 2);
   const dc = document.createElement('canvas');
@@ -102,7 +86,6 @@ function buildDisc(color, r) {
   const cx = size / 2, cy = size / 2;
   const k = Math.log(r + 1) / TAU;
   const steps = 20;
-
   c.fillStyle = color;
   for (let i = 0; i < N; i++) {
     const sa = i * (TAU / N);
@@ -120,25 +103,18 @@ function buildDisc(color, r) {
       const a = sa + ARM_W + theta;
       c.lineTo(cx + rad * Math.cos(a), cy + rad * Math.sin(a));
     }
-    c.closePath();
-    c.fill();
+    c.closePath(); c.fill();
   }
   return dc;
 }
 
-let discR = 0;
-let whiteDiscIdx = -1; // index of the white coverage disc in singleDiscs
-
+let discR = 0, whiteDiscIdx = -1;
 const CMY = ['#00ffff', '#ff00ff', '#ffff00'];
 const RGB = ['#ff0000', '#00ff00', '#0000ff'];
-
-// Speeds: very close together for slow phase
 const CMY_SPEEDS = [ 0.0140,  0.01395, 0.01405];
 const RGB_SPEEDS = [-0.01405,-0.01395,-0.0140];
 const ALL_SPEEDS = [...CMY_SPEEDS, ...RGB_SPEEDS];
-const ALL_VEL_MULT = [0.98, 1.00, 1.02, 1.02, 1.00, 0.98]; // C,M,Y,R,G,B
-
-// All start at 0 = fully aligned = black (CMY) / white (RGB)
+const ALL_VEL_MULT = [0.98, 1.00, 1.02, 1.02, 1.00, 0.98];
 const angles = [0, 0, 0, 0, 0, 0];
 
 function rebuildDiscs(W, H, cxDark, cyDark, cxLight, cyLight) {
@@ -155,403 +131,390 @@ function resize() {
   const winW = window.innerWidth, winH = window.innerHeight;
   let w = winW, h = winW / PHONE_ASPECT;
   if (h > winH) { h = winH; w = winH * PHONE_ASPECT; }
-  stage.style.width = w + 'px';
-  stage.style.height = h + 'px';
-
-  [canvas, offDark, offLight, offWhiteBg, maskLight, maskDark].forEach(cv => {
-    cv.width = w; cv.height = h;
-  });
-
+  stage.style.width = w + 'px'; stage.style.height = h + 'px';
+  [canvas, offDark, offLight, offWhiteBg, maskLight, maskDark].forEach(cv => { cv.width = w; cv.height = h; });
   buildMasks(w, h);
-
   const cxL = w * F.circleX, cyL = h * F.circleY;
   const cxD = w * (F.sqX + F.sqW/2), cyD = h * (F.sqY + F.sqH/2);
   rebuildDiscs(w, h, cxD, cyD, cxL, cyL);
   drawFrame();
 }
 
-// Draw a pre-rendered disc centered at (cx,cy) rotated by angle onto target context
 function blitDisc(targetCtx, discIdx, cx, cy, angle) {
   const dc = singleDiscs[discIdx];
-  targetCtx.save();
-  targetCtx.translate(cx, cy);
-  targetCtx.rotate(angle);
-  targetCtx.drawImage(dc, -discR, -discR);
-  targetCtx.restore();
+  targetCtx.save(); targetCtx.translate(cx, cy); targetCtx.rotate(angle);
+  targetCtx.drawImage(dc, -discR, -discR); targetCtx.restore();
 }
 
 function drawFrame() {
   const W = canvas.width, H = canvas.height;
+  const cxL = W * F.circleX, cyL = H * F.circleY;
+  const cxD = W * (F.sqX + F.sqW/2), cyD = H * (F.sqY + F.sqH/2);
 
-  const cxL = W * F.circleX, cyL = H * F.circleY; // light side center (circle eye)
-  const cxD = W * (F.sqX + F.sqW/2), cyD = H * (F.sqY + F.sqH/2); // dark side center (square eye)
-
-  // ── Dark system (CMY, multiply onto white patches → black when aligned) ──
-  // Step 1: black background (this IS the correct rest/gap color now)
-  ctxDark.fillStyle = '#000';
-  ctxDark.fillRect(0, 0, W, H);
-  // Step 2: patch white only where any CMY arm will land (union coverage),
-  // so multiply has something to act on there, while true gaps stay black.
+  ctxDark.fillStyle = '#000'; ctxDark.fillRect(0, 0, W, H);
   ctxDark.globalCompositeOperation = 'source-over';
   blitDisc(ctxDark, whiteDiscIdx, cxD, cyD, angles[0]);
   blitDisc(ctxDark, whiteDiscIdx, cxD, cyD, angles[1]);
   blitDisc(ctxDark, whiteDiscIdx, cxD, cyD, angles[2]);
-  // Step 3: CMY discs with multiply onto those white patches
   ctxDark.globalCompositeOperation = 'multiply';
-  blitDisc(ctxDark, 0, cxD, cyD, angles[0]); // C
-  blitDisc(ctxDark, 1, cxD, cyD, angles[1]); // M
-  blitDisc(ctxDark, 2, cxD, cyD, angles[2]); // Y
-  ctxDark.globalCompositeOperation = 'source-over';
-  // Step 4: clip to dark face region
+  blitDisc(ctxDark, 0, cxD, cyD, angles[0]);
+  blitDisc(ctxDark, 1, cxD, cyD, angles[1]);
+  blitDisc(ctxDark, 2, cxD, cyD, angles[2]);
   ctxDark.globalCompositeOperation = 'destination-in';
   ctxDark.drawImage(maskDark, 0, 0);
   ctxDark.globalCompositeOperation = 'source-over';
 
-  // ── Light system (RGB, screen onto white → white in gaps, white when aligned) ──
-  // Step 1: white background — gaps stay white
-  ctxLight.fillStyle = '#fff';
-  ctxLight.fillRect(0, 0, W, H);
-  // Step 2: stamp black disc over union of arm coverage, so screen has #000 to work on
-  //         (screen(#000, color) = color; screen(#fff, color) = #fff — we want gaps white,
-  //          arms colored, so we need black under each arm area only)
-  ctxLight.globalCompositeOperation = 'destination-out'; // punch holes = black in canvas
+  ctxLight.fillStyle = '#fff'; ctxLight.fillRect(0, 0, W, H);
+  ctxLight.globalCompositeOperation = 'destination-out';
   blitDisc(ctxLight, whiteDiscIdx, cxL, cyL, angles[3]);
   blitDisc(ctxLight, whiteDiscIdx, cxL, cyL, angles[4]);
   blitDisc(ctxLight, whiteDiscIdx, cxL, cyL, angles[5]);
-  ctxLight.globalCompositeOperation = 'source-over';
-  // Step 3: RGB discs with screen onto those black patches
   ctxLight.globalCompositeOperation = 'screen';
-  blitDisc(ctxLight, 3, cxL, cyL, angles[3]); // R
-  blitDisc(ctxLight, 4, cxL, cyL, angles[4]); // G
-  blitDisc(ctxLight, 5, cxL, cyL, angles[5]); // B
-  ctxLight.globalCompositeOperation = 'source-over';
-  // Step 3: clip to light face region
+  blitDisc(ctxLight, 3, cxL, cyL, angles[3]);
+  blitDisc(ctxLight, 4, cxL, cyL, angles[4]);
+  blitDisc(ctxLight, 5, cxL, cyL, angles[5]);
   ctxLight.globalCompositeOperation = 'destination-in';
   ctxLight.drawImage(maskLight, 0, 0);
   ctxLight.globalCompositeOperation = 'source-over';
 
-  // ── Compose onto main canvas ──
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, W, H);
-  ctx.drawImage(offDark, 0, 0);
-  ctx.drawImage(offLight, 0, 0);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(offDark, 0, 0); ctx.drawImage(offLight, 0, 0);
 }
 
-// ── Audio ────────────────────────────────────────────────────────────────────
-let audioCtx = null;
-const audioOscs = []; // { osc, panner, gainNode, baseFreq }
-const BASE_FREQS = [500, 600];
-
-// Leslie Doppler params — rotor IS the spiral angle
-const PITCH_DEPTH  = 40;   // Hz deviation around base
-const PAN_DEPTH    = 0.9;  // 0–1 stereo width
-
+// ── Audio ─────────────────────────────────────────────────────────────────────
+let audioCtx   = null;
 let audioMaster = null;
 let audioBuilt  = false;
-let panAngleCMY = 0;   // 500 Hz follows CMY spiral (positive)
-let panAngleRGB = 0;   // 600 Hz follows RGB spiral (negative)
+const audioOscs = [];
+const BASE_FREQS   = [500, 600];
+const PITCH_DEPTH  = 40;
+const PAN_DEPTH    = 0.9;
+let panAngleCMY = 0;
+let panAngleRGB = 0;
 
 function buildAudioGraph() {
   if (audioBuilt) return;
   audioBuilt = true;
-
   const master = audioCtx.createGain();
   master.gain.setValueAtTime(0, audioCtx.currentTime);
   master.gain.linearRampToValueAtTime(0.6, audioCtx.currentTime + 1);
   master.connect(audioCtx.destination);
   audioMaster = master;
-
-  BASE_FREQS.forEach((freq, i) => {
+  BASE_FREQS.forEach((freq) => {
     const osc = audioCtx.createOscillator();
-    osc.type = 'sine';
+    osc.type  = 'sine';
     osc.frequency.value = freq;
+
+    // LFO modulates amplitude (tremolo) — rate tracks spiral rotation speed
+    const lfo = audioCtx.createOscillator();
+    lfo.type  = 'sine';
+    lfo.frequency.value = 0.1;
+    const lfoGain = audioCtx.createGain();
+    lfoGain.gain.value = 0.125; // depth: ±0.125 → swings 0.25–0.5, never silent
+    lfo.connect(lfoGain);
 
     const panner = audioCtx.createStereoPanner();
     panner.pan.value = 0;
-
     const gainNode = audioCtx.createGain();
-    gainNode.gain.value = 0.33;
+    gainNode.gain.value = 0.375; // center: LFO swings between 0.25 and 0.5
+    lfoGain.connect(gainNode.gain); // LFO → gain.gain (tremolo)
+
+    // pauseGain sits after tremolo — set to 0 to silence without fighting LFO
+    const pauseGain = audioCtx.createGain();
+    pauseGain.gain.value = 1;
 
     osc.connect(gainNode);
-    gainNode.connect(panner);
+    gainNode.connect(pauseGain);
+    pauseGain.connect(panner);
     panner.connect(master);
+    lfo.start();
     osc.start();
-
-    audioOscs.push({ osc, panner, gainNode, baseFreq: freq });
+    audioOscs.push({ osc, lfo, lfoGain, panner, gainNode, pauseGain, baseFreq: freq });
   });
-}
-
-function initAudio() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  }
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume();
-  }
-  buildAudioGraph();
 }
 
 function updateAudio() {
   if (!audioBuilt || !audioCtx) return;
 
-  // Each oscillator follows its own spiral
-  // CMY (index 0, 500 Hz): positive direction
-  // RGB (index 1, 600 Hz): negative direction
   panAngleCMY += ALL_SPEEDS[0] + velocityDark  * ALL_VEL_MULT[0];
   panAngleRGB += ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3];
 
   const panCMY   = Math.cos(panAngleCMY) * PAN_DEPTH;
   const pitchCMY = Math.sin(panAngleCMY) * PITCH_DEPTH;
-
   const panRGB   = Math.cos(panAngleRGB) * PAN_DEPTH;
   const pitchRGB = Math.sin(panAngleRGB) * PITCH_DEPTH;
 
+  // LFO rate = rotations per second of each spiral
+  // angularSpeed (rad/frame) * 24fps / TAU = Hz
+  const angularDark  = Math.abs(ALL_SPEEDS[0] + velocityDark  * ALL_VEL_MULT[0]);
+  const angularLight = Math.abs(ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3]);
+  const lfoHzDark  = angularDark  * 24 / (Math.PI * 2) * 37.5;
+  const lfoHzLight = angularLight * 24 / (Math.PI * 2) * 37.5;
+
+  // LFO depth scales with velocity
+  // depth grows with velocity: 0.125 at rest → up to 0.35 at full swipe (min gain ~0.025, near silent)
+  const depthDark  = 0.125 + Math.min(Math.abs(velocityDark)  * 3, 0.225);
+  const depthLight = 0.125 + Math.min(Math.abs(velocityLight) * 3, 0.225);
+
   audioOscs[0].panner.pan.setTargetAtTime(panCMY, audioCtx.currentTime, 0.008);
   audioOscs[0].osc.frequency.setTargetAtTime(audioOscs[0].baseFreq + pitchCMY, audioCtx.currentTime, 0.008);
+  audioOscs[0].lfo.frequency.setTargetAtTime(lfoHzDark,  audioCtx.currentTime, 0.05);
+  audioOscs[0].lfoGain.gain.setTargetAtTime(depthDark,   audioCtx.currentTime, 0.05);
 
   audioOscs[1].panner.pan.setTargetAtTime(panRGB, audioCtx.currentTime, 0.008);
   audioOscs[1].osc.frequency.setTargetAtTime(audioOscs[1].baseFreq + pitchRGB, audioCtx.currentTime, 0.008);
+  audioOscs[1].lfo.frequency.setTargetAtTime(lfoHzLight, audioCtx.currentTime, 0.05);
+  audioOscs[1].lfoGain.gain.setTargetAtTime(depthLight,  audioCtx.currentTime, 0.05);
 }
 
-// ── Input ────────────────────────────────────────────────────────────────────
-let velocityDark  = 0; // CMY / quadrado
-let velocityLight = 0; // RGB / círculo
-const friction = 0.96;
-let lastX = null, lastY = null, lastT = null;
+// ── State ─────────────────────────────────────────────────────────────────────
+let velocityDark  = 0;
+let velocityLight = 0;
+const friction    = 0.96;
 let started = false;
+let pausedDark  = false;
+let pausedLight = false;
+let tapCount   = 0, lastTapTime   = 0;
+let tapCountSq = 0, lastTapTimeSq = 0;
+const TAP_WINDOW = 600;
+const FRAME_INTERVAL = 1000 / 24;
+let lastFrameTime = 0;
+let rafId = null;
 
-function startExperience() { /* handled directly in pointerdown */ }
-
-// Re-measure after fullscreen transition completes
+// ── Fullscreen ────────────────────────────────────────────────────────────────
 document.addEventListener('fullscreenchange', resize);
 document.addEventListener('webkitfullscreenchange', resize);
 
-function isInsideCircle(clientX, clientY) {
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const x = (clientX - rect.left) * scaleX;
-  const y = (clientY - rect.top) * scaleY;
-  const cx = canvas.width * F.circleX, cy = canvas.height * F.circleY, r = canvas.width * F.circleR;
-  return Math.hypot(x - cx, y - cy) <= r;
+function requestFS() {
+  const el = document.documentElement;
+  const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
+  if (fn) fn.call(el).catch(() => {});
 }
 
-function isInsideSquare(clientX, clientY) {
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const x = (clientX - rect.left) * scaleX;
-  const y = (clientY - rect.top) * scaleY;
-  const sx = canvas.width * F.sqX, sy = canvas.height * F.sqY;
-  const sw = canvas.width * F.sqW, sh = canvas.height * F.sqH;
-  return x >= sx && x <= sx + sw && y >= sy && y <= sy + sh;
+// ── Hit tests ─────────────────────────────────────────────────────────────────
+function isInsideCircle(cx, cy) {
+  const r = canvas.getBoundingClientRect();
+  const sx = canvas.width / r.width, sy = canvas.height / r.height;
+  const x = (cx - r.left) * sx, y = (cy - r.top) * sy;
+  return Math.hypot(x - canvas.width * F.circleX, y - canvas.height * F.circleY) <= canvas.width * F.circleR;
+}
+function isInsideSquare(cx, cy) {
+  const r = canvas.getBoundingClientRect();
+  const sx = canvas.width / r.width, sy = canvas.height / r.height;
+  const x = (cx - r.left) * sx, y = (cy - r.top) * sy;
+  return x >= canvas.width * F.sqX && x <= canvas.width * (F.sqX + F.sqW)
+      && y >= canvas.height * F.sqY && y <= canvas.height * (F.sqY + F.sqH);
 }
 
-let pausedDark  = false; // CMY / quadrado
-let pausedLight = false; // RGB / círculo
-
+// ── Pause toggles ─────────────────────────────────────────────────────────────
 function togglePauseDark() {
   pausedDark = !pausedDark;
-  // quadrado controla oscilador médio (700 Hz)
   if (audioBuilt && audioCtx) {
-    const g = audioOscs[0].gainNode;
-    const target = pausedDark ? 0 : 0.33;
-    g.gain.cancelScheduledValues(audioCtx.currentTime);
-    g.gain.linearRampToValueAtTime(target, audioCtx.currentTime + 0.2);
+    const g = audioOscs[0].pauseGain.gain;
+    g.cancelScheduledValues(audioCtx.currentTime);
+    g.linearRampToValueAtTime(pausedDark ? 0 : 1, audioCtx.currentTime + 0.2);
   }
 }
-
 function togglePauseLight() {
   pausedLight = !pausedLight;
-  // círculo controla oscilador agudo (1750 Hz)
   if (audioBuilt && audioCtx) {
-    const g = audioOscs[1].gainNode;
-    const target = pausedLight ? 0 : 0.33;
-    g.gain.cancelScheduledValues(audioCtx.currentTime);
-    g.gain.linearRampToValueAtTime(target, audioCtx.currentTime + 0.2);
+    const g = audioOscs[1].pauseGain.gain;
+    g.cancelScheduledValues(audioCtx.currentTime);
+    g.linearRampToValueAtTime(pausedLight ? 0 : 1, audioCtx.currentTime + 0.2);
   }
 }
 
-let tapCount = 0, lastTapTime = 0;
-let tapCountSq = 0, lastTapTimeSq = 0;
-const TAP_WINDOW = 600;
-
+// ── Reset ─────────────────────────────────────────────────────────────────────
 function resetExperience() {
-  // stop audio
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
-  audioBuilt = false;
-  audioOscs.length = 0;
-  audioMaster = null;
-
-  // reset angles and velocities
+  audioBuilt = false; audioOscs.length = 0; audioMaster = null;
   angles.fill(0);
   velocityDark = 0; velocityLight = 0;
   panAngleCMY = 0; panAngleRGB = 0;
-
-  // reset state
-  started = false;
-  pausedDark = false; pausedLight = false;
-
-  // show overlay again
-  const ov = document.getElementById('overlay');
-  if (ov) ov.style.display = '';
-
-  // cancel render loop — overlay tap will restart it
+  started = false; pausedDark = false; pausedLight = false;
+  tapCount = 0; tapCountSq = 0;
   if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
   lastFrameTime = 0;
-  // draw static frame so screen isn't blank while waiting
-  angles.fill(0);
+  document.getElementById('overlay').style.display = '';
   drawFrame();
 }
 
+// ── Capture ───────────────────────────────────────────────────────────────────
 function captureHighRes() {
-  const targetW = 1080;
-  const targetH = Math.round(targetW / PHONE_ASPECT);
+  const targetW = 1080, targetH = Math.round(targetW / PHONE_ASPECT);
   const prevW = canvas.width, prevH = canvas.height;
-
   [canvas, offDark, offLight, offWhiteBg, maskLight, maskDark].forEach(cv => { cv.width = targetW; cv.height = targetH; });
   buildMasks(targetW, targetH);
-  const cxL = targetW * F.circleX, cyL = targetH * F.circleY;
-  const cxD = targetW * (F.sqX + F.sqW / 2), cyD = targetH * (F.sqY + F.sqH / 2);
-  rebuildDiscs(targetW, targetH, cxD, cyD, cxL, cyL);
+  rebuildDiscs(targetW, targetH, targetW*(F.sqX+F.sqW/2), targetH*(F.sqY+F.sqH/2), targetW*F.circleX, targetH*F.circleY);
   drawFrame();
-
   canvas.toBlob(blob => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = 'screen-trance-' + Date.now() + '.png';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    a.href = url; a.download = 'screen-trance-' + Date.now() + '.png';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   }, 'image/png');
-
   [canvas, offDark, offLight, offWhiteBg, maskLight, maskDark].forEach(cv => { cv.width = prevW; cv.height = prevH; });
   buildMasks(prevW, prevH);
-  const cxL2 = prevW * F.circleX, cyL2 = prevH * F.circleY;
-  const cxD2 = prevW * (F.sqX + F.sqW / 2), cyD2 = prevH * (F.sqY + F.sqH / 2);
-  rebuildDiscs(prevW, prevH, cxD2, cyD2, cxL2, cyL2);
+  rebuildDiscs(prevW, prevH, prevW*(F.sqX+F.sqW/2), prevH*(F.sqY+F.sqH/2), prevW*F.circleX, prevH*F.circleY);
   drawFrame();
 }
 
-let downX = null, downY = null, downTime = null;
+// ── Overlay — first touch starts everything ───────────────────────────────────
+const overlayEl = document.getElementById('overlay');
 
-// Overlay captures first touch after load or reset
-document.getElementById('overlay').addEventListener('pointerdown', e => {
+function handleStart(e) {
   if (started) return;
+  e.preventDefault();
   started = true;
-  document.getElementById('overlay').style.display = 'none';
+  overlayEl.style.display = 'none';
 
-  const el = document.documentElement;
-  const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
-  if (req) req.call(el).catch(() => {});
+  requestFS();
 
+  // AudioContext created directly inside touch handler — Chrome Android requires this
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  audioCtx.resume();
   buildAudioGraph();
 
-  // reset tracking state
-  downX = null; downY = null; downTime = null;
-  lastX = null; lastY = null; lastT = null;
   velocityDark = 0; velocityLight = 0;
   lastFrameTime = 0;
-
   rafId = requestAnimationFrame(render);
-});
+}
+
+overlayEl.addEventListener('touchstart', handleStart, { passive: false });
+overlayEl.addEventListener('mousedown',  handleStart);
+
+// ── Canvas input ──────────────────────────────────────────────────────────────
+canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
+canvas.addEventListener('touchmove',  e => e.preventDefault(), { passive: false });
+
+// ── Hit-test helpers ──────────────────────────────────────────────────────────
+let hitCanvas = null, hitCtx = null;
+function ensureHitCanvas() {
+  if (hitCanvas && hitCanvas.width === canvas.width) return;
+  hitCanvas = document.createElement('canvas');
+  hitCanvas.width = canvas.width; hitCanvas.height = canvas.height;
+  hitCtx = hitCanvas.getContext('2d');
+  drawStaircasePath(hitCtx, canvas.width, canvas.height);
+}
+
+// Returns 'dark', 'light', or null (circle/square tap targets — no swipe)
+function getZone(clientX, clientY) {
+  ensureHitCanvas();
+  const rect = canvas.getBoundingClientRect();
+  const x = (clientX - rect.left) * (canvas.width  / rect.width);
+  const y = (clientY - rect.top)  * (canvas.height / rect.height);
+  const W = canvas.width, H = canvas.height;
+  // exclude tap targets
+  if (Math.hypot(x - W*F.circleX, y - H*F.circleY) <= W*F.circleR) return null;
+  if (x >= W*F.sqX && x <= W*(F.sqX+F.sqW) && y >= H*F.sqY && y <= H*(F.sqY+F.sqH)) return null;
+  // staircase = right side → controls dark/CMY; left → controls light/RGB
+  return hitCtx.isPointInPath(x, y) ? 'dark' : 'light';
+}
+
+// ── Multi-touch tracking ───────────────────────────────────────────────────────
+// Map<pointerId, { x, y, t, zone, downX, downY, downTime }>
+const activePointers = new Map();
 
 canvas.addEventListener('pointerdown', e => {
   if (!started) return;
-  downX = e.clientX; downY = e.clientY; downTime = performance.now();
-  lastX = e.clientX; lastY = e.clientY; lastT = performance.now();
+  canvas.setPointerCapture(e.pointerId);
+  const zone = getZone(e.clientX, e.clientY);
+  activePointers.set(e.pointerId, {
+    x: e.clientX, y: e.clientY, t: performance.now(), zone,
+    downX: e.clientX, downY: e.clientY, downTime: performance.now()
+  });
 });
+
 canvas.addEventListener('pointermove', e => {
-  if (lastX === null) return;
+  const p = activePointers.get(e.pointerId);
+  if (!p) return;
   const now = performance.now();
-  const dt = Math.max(now - lastT, 1);
-  const dx = e.clientX - lastX;
-  const dy = e.clientY - lastY;
+  const dt  = Math.max(now - p.t, 1);
+  const dx  = e.clientX - p.x;
+  const dy  = e.clientY - p.y;
 
-  const rect = canvas.getBoundingClientRect();
-  const xNorm = (e.clientX - rect.left) / rect.width; // 0=left, 1=right
+  // Swipe down = accelerate, swipe up = decelerate/reverse — same for both sides
+  const impulse = Math.abs(dy) > Math.abs(dx)
+    ? (dy / canvas.height) * 0.5 * (16 / dt)
+    : (dx / canvas.width)  * 0.5 * (16 / dt);
 
-  let impulse;
-  if (Math.abs(dy) > Math.abs(dx)) {
-    impulse = (-dy / canvas.height) * 0.5 * (16 / dt);
-  } else {
-    impulse = (dx / canvas.width) * 0.5 * (16 / dt);
-  }
+  // Update zone dynamically — null = over tap target, skip
+  p.zone = getZone(e.clientX, e.clientY);
+  if (p.zone === 'dark')  velocityDark  += impulse;
+  if (p.zone === 'light') velocityLight -= impulse; // RGB rotates negative, invert to match
 
-  // Three zones: left third → RGB only, middle third → both, right third → CMY only
-  if (xNorm < 0.333) {
-    velocityLight += impulse;
-  } else if (xNorm > 0.667) {
-    velocityDark += impulse;
-  } else {
-    velocityDark  += impulse;
-    velocityLight += impulse;
-  }
-
-  lastX = e.clientX; lastY = e.clientY; lastT = now;
+  p.x = e.clientX; p.y = e.clientY; p.t = now;
 });
+
 canvas.addEventListener('pointerup', e => {
-  const dt = performance.now() - (downTime || 0);
-  const dist = Math.hypot(e.clientX - (downX || e.clientX), e.clientY - (downY || e.clientY));
+  const p = activePointers.get(e.pointerId);
+  activePointers.delete(e.pointerId);
+  if (!p) return;
+  const dt   = performance.now() - p.downTime;
+  const dist = Math.hypot(e.clientX - p.downX, e.clientY - p.downY);
   if (dt < 300 && dist < 10) {
     if (isInsideSquare(e.clientX, e.clientY)) {
       const now = performance.now();
       tapCountSq = (now - lastTapTimeSq < TAP_WINDOW) ? tapCountSq + 1 : 1;
       lastTapTimeSq = now;
-      if (tapCountSq >= 3) {
-        tapCountSq = 0;
-        resetExperience();
-      } else {
-        togglePauseDark();
-      }
+      if (tapCountSq >= 3) { tapCountSq = 0; resetExperience(); }
+      else togglePauseDark();
     } else if (isInsideCircle(e.clientX, e.clientY)) {
       const now = performance.now();
       tapCount = (now - lastTapTime < TAP_WINDOW) ? tapCount + 1 : 1;
       lastTapTime = now;
-      if (tapCount >= 3) {
-        tapCount = 0;
-        captureHighRes();
-      } else {
-        togglePauseLight();
-      }
+      if (tapCount >= 3) { tapCount = 0; captureHighRes(); }
+      else togglePauseLight();
     }
   }
-  lastX = null; lastY = null;
 });
-canvas.addEventListener('touchstart', e => {
-  // prevent scroll/zoom but still allow pointerdown to fire
-  if (e.touches.length === 1) e.preventDefault();
-}, { passive: false });
-canvas.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+
+canvas.addEventListener('pointercancel', e => { activePointers.delete(e.pointerId); });
 
 // ── Render loop ───────────────────────────────────────────────────────────────
-const FRAME_INTERVAL = 1000 / 24;
-let lastFrameTime = 0;
-let rafId = null;
-
 function render(now) {
   rafId = requestAnimationFrame(render);
   if (now - lastFrameTime < FRAME_INTERVAL) return;
   lastFrameTime = now;
 
-  // Each system can be paused independently
-  const bothPaused = pausedDark && pausedLight;
   velocityDark  *= friction;
   velocityLight *= friction;
-  if (!pausedDark)  { angles[0] += ALL_SPEEDS[0] + velocityDark  * ALL_VEL_MULT[0];
-                      angles[1] += ALL_SPEEDS[1] + velocityDark  * ALL_VEL_MULT[1];
-                      angles[2] += ALL_SPEEDS[2] + velocityDark  * ALL_VEL_MULT[2]; }
-  if (!pausedLight) { angles[3] += ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3];
-                      angles[4] += ALL_SPEEDS[4] + velocityLight * ALL_VEL_MULT[4];
-                      angles[5] += ALL_SPEEDS[5] + velocityLight * ALL_VEL_MULT[5]; }
-  if (bothPaused) return;
+
+  // Cap velocity to avoid temporal aliasing (wagon-wheel effect)
+  // Max safe step = TAU/48 rad/frame (half the spacing between arms)
+  const maxV = (Math.PI * 2 / 48 - ALL_SPEEDS[0]) / ALL_VEL_MULT[0];
+  velocityDark  = Math.max(Math.min(velocityDark,  maxV), -maxV);
+  velocityLight = Math.max(Math.min(velocityLight, maxV), -maxV);
+
+  // If velocity is positive (same as CMY natural direction) and decaying, clamp at 0
+  // — don't let it go negative unless user explicitly swiped that way
+
+
+  if (!pausedDark) {
+    // clamp so CMY never goes negative (stops but doesn't reverse unless explicit swipe)
+    const dStep = ALL_SPEEDS[0] + velocityDark * ALL_VEL_MULT[0];
+    if (dStep > 0 || velocityDark < -ALL_SPEEDS[0] / ALL_VEL_MULT[0]) {
+      angles[0] += ALL_SPEEDS[0] + velocityDark * ALL_VEL_MULT[0];
+      angles[1] += ALL_SPEEDS[1] + velocityDark * ALL_VEL_MULT[1];
+      angles[2] += ALL_SPEEDS[2] + velocityDark * ALL_VEL_MULT[2];
+    }
+    // once stopped by deceleration, bleed velocity back toward 0 (don't re-accelerate)
+    if (dStep <= 0 && velocityDark < 0) velocityDark = Math.min(velocityDark * friction, 0);
+  }
+  if (!pausedLight) {
+    // clamp so RGB never goes positive (stops but doesn't reverse unless explicit swipe)
+    const lStep = ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3];
+    if (lStep < 0 || velocityLight > -ALL_SPEEDS[3] / ALL_VEL_MULT[3]) {
+      angles[3] += ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3];
+      angles[4] += ALL_SPEEDS[4] + velocityLight * ALL_VEL_MULT[4];
+      angles[5] += ALL_SPEEDS[5] + velocityLight * ALL_VEL_MULT[5];
+    }
+    if (lStep >= 0 && velocityLight > 0) velocityLight = Math.max(velocityLight * friction, 0);
+  }
+  if (pausedDark && pausedLight) return;
 
   updateAudio();
-
   drawFrame();
 }
 
