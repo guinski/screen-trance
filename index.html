@@ -182,7 +182,8 @@ function drawFrame() {
 }
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
-let audioCtx   = null;
+// AudioContext created immediately — works on Android without gesture
+const audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
 let audioMaster = null;
 let audioBuilt  = false;
 const audioOscs = [];
@@ -326,7 +327,6 @@ function togglePauseLight() {
 
 // ── Reset ─────────────────────────────────────────────────────────────────────
 function resetExperience() {
-  if (audioCtx) { audioCtx.close(); audioCtx = null; }
   audioBuilt = false; audioOscs.length = 0; audioMaster = null;
   angles.fill(0);
   velocityDark = 0; velocityLight = 0;
@@ -360,29 +360,25 @@ function captureHighRes() {
   drawFrame();
 }
 
-// ── Overlay — first touch starts everything ───────────────────────────────────
+// ── Start ────────────────────────────────────────────────────────────────────
 const overlayEl = document.getElementById('overlay');
 
-function handleStart(e) {
+overlayEl.addEventListener('pointerup', e => {
   if (started) return;
-  e.preventDefault();
   started = true;
   overlayEl.style.display = 'none';
 
-  requestFS();
+  // Both fullscreen and audio resume must happen in the same gesture handler
+  const doc = document.documentElement;
+  if (doc.requestFullscreen) doc.requestFullscreen().catch(() => {});
+  else if (doc.webkitRequestFullscreen) doc.webkitRequestFullscreen();
 
-  // AudioContext created directly inside touch handler — Chrome Android requires this
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  audioCtx.resume();
-  buildAudioGraph();
+  audioCtx.resume().then(() => buildAudioGraph());
 
   velocityDark = 0; velocityLight = 0;
   lastFrameTime = 0;
   rafId = requestAnimationFrame(render);
-}
-
-overlayEl.addEventListener('touchstart', handleStart, { passive: false });
-overlayEl.addEventListener('mousedown',  handleStart);
+});
 
 // ── Canvas input ──────────────────────────────────────────────────────────────
 canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
