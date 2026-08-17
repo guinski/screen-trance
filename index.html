@@ -13,16 +13,10 @@
   }
   #stage { position: relative; background: #000; }
   canvas { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
-  #overlay {
-    position: fixed; inset: 0; z-index: 99;
-    background: transparent; touch-action: none;
-    -webkit-tap-highlight-color: transparent;
-  }
 </style>
 </head>
 <body>
 <div id="stage"><canvas id="c"></canvas></div>
-<div id="overlay"></div>
 <script>
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -118,7 +112,7 @@ const ALL_VEL_MULT = [0.98, 1.00, 1.02, 1.02, 1.00, 0.98];
 const angles = [0, 0, 0, 0, 0, 0];
 
 function rebuildDiscs(W, H, cxDark, cyDark, cxLight, cyLight) {
-  const r1 = Math.sqrt(Math.max(cxDark,  W-cxDark) **2 + Math.max(cyDark,  H-cyDark) **2) * 1.05;
+  const r1 = Math.sqrt(Math.max(cxDark,  W-cxDark)**2  + Math.max(cyDark,  H-cyDark)**2)  * 1.05;
   const r2 = Math.sqrt(Math.max(cxLight, W-cxLight)**2 + Math.max(cyLight, H-cyLight)**2) * 1.05;
   discR = Math.max(r1, r2);
   singleDiscs.length = 0;
@@ -133,6 +127,7 @@ function resize() {
   if (h > winH) { h = winH; w = winH * PHONE_ASPECT; }
   stage.style.width = w + 'px'; stage.style.height = h + 'px';
   [canvas, offDark, offLight, offWhiteBg, maskLight, maskDark].forEach(cv => { cv.width = w; cv.height = h; });
+  hitCanvas = null; // force rebuild of swipe hit-test canvas
   buildMasks(w, h);
   const cxL = w * F.circleX, cyL = h * F.circleY;
   const cxD = w * (F.sqX + F.sqW/2), cyD = h * (F.sqY + F.sqH/2);
@@ -182,14 +177,14 @@ function drawFrame() {
 }
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
-// AudioContext created immediately — works on Android without gesture
-const audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
+// AudioContext created on first gesture (required by iOS)
+let audioCtx    = null;
 let audioMaster = null;
 let audioBuilt  = false;
 const audioOscs = [];
-const BASE_FREQS   = [500, 600];
-const PITCH_DEPTH  = 40;
-const PAN_DEPTH    = 0.9;
+const BASE_FREQS  = [500, 600];
+const PITCH_DEPTH = 40;
+const PAN_DEPTH   = 0.9;
 let panAngleCMY = 0;
 let panAngleRGB = 0;
 
@@ -201,28 +196,27 @@ function buildAudioGraph() {
   master.gain.linearRampToValueAtTime(0.6, audioCtx.currentTime + 1);
   master.connect(audioCtx.destination);
   audioMaster = master;
-  BASE_FREQS.forEach((freq) => {
+  BASE_FREQS.forEach(freq => {
     const osc = audioCtx.createOscillator();
-    osc.type  = 'sine';
+    osc.type = 'sine';
     osc.frequency.value = freq;
 
-    // LFO modulates amplitude (tremolo) — rate tracks spiral rotation speed
     const lfo = audioCtx.createOscillator();
-    lfo.type  = 'sine';
-    lfo.frequency.value = 0.1;
+    lfo.type = 'sine';
+    lfo.frequency.value = 2;
     const lfoGain = audioCtx.createGain();
-    lfoGain.gain.value = 0.125; // depth: ±0.125 → swings 0.25–0.5, never silent
+    lfoGain.gain.value = 0.125;
     lfo.connect(lfoGain);
+
+    const gainNode = audioCtx.createGain();
+    gainNode.gain.value = 0.375;
+    lfoGain.connect(gainNode.gain);
+
+    const pauseGain = audioCtx.createGain();
+    pauseGain.gain.value = 1;
 
     const panner = audioCtx.createStereoPanner();
     panner.pan.value = 0;
-    const gainNode = audioCtx.createGain();
-    gainNode.gain.value = 0.375; // center: LFO swings between 0.25 and 0.5
-    lfoGain.connect(gainNode.gain); // LFO → gain.gain (tremolo)
-
-    // pauseGain sits after tremolo — set to 0 to silence without fighting LFO
-    const pauseGain = audioCtx.createGain();
-    pauseGain.gain.value = 1;
 
     osc.connect(gainNode);
     gainNode.connect(pauseGain);
@@ -236,7 +230,6 @@ function buildAudioGraph() {
 
 function updateAudio() {
   if (!audioBuilt || !audioCtx) return;
-
   panAngleCMY += ALL_SPEEDS[0] + velocityDark  * ALL_VEL_MULT[0];
   panAngleRGB += ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3];
 
@@ -245,69 +238,58 @@ function updateAudio() {
   const panRGB   = Math.cos(panAngleRGB) * PAN_DEPTH;
   const pitchRGB = Math.sin(panAngleRGB) * PITCH_DEPTH;
 
-  // LFO rate = rotations per second of each spiral
-  // angularSpeed (rad/frame) * 24fps / TAU = Hz
   const angularDark  = Math.abs(ALL_SPEEDS[0] + velocityDark  * ALL_VEL_MULT[0]);
   const angularLight = Math.abs(ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3]);
   const lfoHzDark  = angularDark  * 24 / (Math.PI * 2) * 37.5;
   const lfoHzLight = angularLight * 24 / (Math.PI * 2) * 37.5;
-
-  // LFO depth scales with velocity
-  // depth grows with velocity: 0.125 at rest → up to 0.35 at full swipe (min gain ~0.025, near silent)
   const depthDark  = 0.125 + Math.min(Math.abs(velocityDark)  * 3, 0.225);
   const depthLight = 0.125 + Math.min(Math.abs(velocityLight) * 3, 0.225);
 
-  audioOscs[0].panner.pan.setTargetAtTime(panCMY, audioCtx.currentTime, 0.008);
-  audioOscs[0].osc.frequency.setTargetAtTime(audioOscs[0].baseFreq + pitchCMY, audioCtx.currentTime, 0.008);
-  audioOscs[0].lfo.frequency.setTargetAtTime(lfoHzDark,  audioCtx.currentTime, 0.05);
-  audioOscs[0].lfoGain.gain.setTargetAtTime(depthDark,   audioCtx.currentTime, 0.05);
+  const t = audioCtx.currentTime;
+  audioOscs[0].panner.pan.setTargetAtTime(panCMY,   t, 0.008);
+  audioOscs[0].osc.frequency.setTargetAtTime(audioOscs[0].baseFreq + pitchCMY, t, 0.008);
+  audioOscs[0].lfo.frequency.setTargetAtTime(lfoHzDark,  t, 0.05);
+  audioOscs[0].lfoGain.gain.setTargetAtTime(depthDark,   t, 0.05);
 
-  audioOscs[1].panner.pan.setTargetAtTime(panRGB, audioCtx.currentTime, 0.008);
-  audioOscs[1].osc.frequency.setTargetAtTime(audioOscs[1].baseFreq + pitchRGB, audioCtx.currentTime, 0.008);
-  audioOscs[1].lfo.frequency.setTargetAtTime(lfoHzLight, audioCtx.currentTime, 0.05);
-  audioOscs[1].lfoGain.gain.setTargetAtTime(depthLight,  audioCtx.currentTime, 0.05);
+  audioOscs[1].panner.pan.setTargetAtTime(panRGB,   t, 0.008);
+  audioOscs[1].osc.frequency.setTargetAtTime(audioOscs[1].baseFreq + pitchRGB, t, 0.008);
+  audioOscs[1].lfo.frequency.setTargetAtTime(lfoHzLight, t, 0.05);
+  audioOscs[1].lfoGain.gain.setTargetAtTime(depthLight,  t, 0.05);
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let velocityDark  = 0;
 let velocityLight = 0;
 const friction    = 0.96;
-let started = false;
-let pausedDark  = false;
-let pausedLight = false;
-let tapCount   = 0, lastTapTime   = 0;
-let tapCountSq = 0, lastTapTimeSq = 0;
-const TAP_WINDOW = 600;
+let started       = false;
+let pausedDark    = false;
+let pausedLight   = false;
+let tapCount      = 0, lastTapTime   = 0;
+let tapCountSq    = 0, lastTapTimeSq = 0;
+const TAP_WINDOW     = 600;
 const FRAME_INTERVAL = 1000 / 24;
 let lastFrameTime = 0;
 let rafId = null;
 
-// ── Fullscreen ────────────────────────────────────────────────────────────────
 document.addEventListener('fullscreenchange', resize);
 document.addEventListener('webkitfullscreenchange', resize);
-
-function requestFS() {
-  const el = document.documentElement;
-  const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
-  if (fn) fn.call(el).catch(() => {});
-}
 
 // ── Hit tests ─────────────────────────────────────────────────────────────────
 function isInsideCircle(cx, cy) {
   const r = canvas.getBoundingClientRect();
-  const sx = canvas.width / r.width, sy = canvas.height / r.height;
-  const x = (cx - r.left) * sx, y = (cy - r.top) * sy;
+  const x = (cx - r.left) * (canvas.width  / r.width);
+  const y = (cy - r.top)  * (canvas.height / r.height);
   return Math.hypot(x - canvas.width * F.circleX, y - canvas.height * F.circleY) <= canvas.width * F.circleR;
 }
 function isInsideSquare(cx, cy) {
   const r = canvas.getBoundingClientRect();
-  const sx = canvas.width / r.width, sy = canvas.height / r.height;
-  const x = (cx - r.left) * sx, y = (cy - r.top) * sy;
+  const x = (cx - r.left) * (canvas.width  / r.width);
+  const y = (cy - r.top)  * (canvas.height / r.height);
   return x >= canvas.width * F.sqX && x <= canvas.width * (F.sqX + F.sqW)
       && y >= canvas.height * F.sqY && y <= canvas.height * (F.sqY + F.sqH);
 }
 
-// ── Pause toggles ─────────────────────────────────────────────────────────────
+// ── Pause ─────────────────────────────────────────────────────────────────────
 function togglePauseDark() {
   pausedDark = !pausedDark;
   if (audioBuilt && audioCtx) {
@@ -335,7 +317,6 @@ function resetExperience() {
   tapCount = 0; tapCountSq = 0;
   if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
   lastFrameTime = 0;
-  document.getElementById('overlay').style.display = '';
   drawFrame();
 }
 
@@ -360,31 +341,7 @@ function captureHighRes() {
   drawFrame();
 }
 
-// ── Start ────────────────────────────────────────────────────────────────────
-const overlayEl = document.getElementById('overlay');
-
-overlayEl.addEventListener('pointerup', e => {
-  if (started) return;
-  started = true;
-  overlayEl.style.display = 'none';
-
-  // Both fullscreen and audio resume must happen in the same gesture handler
-  const doc = document.documentElement;
-  if (doc.requestFullscreen) doc.requestFullscreen().catch(() => {});
-  else if (doc.webkitRequestFullscreen) doc.webkitRequestFullscreen();
-
-  audioCtx.resume().then(() => buildAudioGraph());
-
-  velocityDark = 0; velocityLight = 0;
-  lastFrameTime = 0;
-  rafId = requestAnimationFrame(render);
-});
-
-// ── Canvas input ──────────────────────────────────────────────────────────────
-canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
-canvas.addEventListener('touchmove',  e => e.preventDefault(), { passive: false });
-
-// ── Hit-test helpers ──────────────────────────────────────────────────────────
+// ── Swipe zone hit-test ───────────────────────────────────────────────────────
 let hitCanvas = null, hitCtx = null;
 function ensureHitCanvas() {
   if (hitCanvas && hitCanvas.width === canvas.width) return;
@@ -393,70 +350,80 @@ function ensureHitCanvas() {
   hitCtx = hitCanvas.getContext('2d');
   drawStaircasePath(hitCtx, canvas.width, canvas.height);
 }
-
-// Returns 'dark', 'light', or null (circle/square tap targets — no swipe)
 function getZone(clientX, clientY) {
   ensureHitCanvas();
-  const rect = canvas.getBoundingClientRect();
-  const x = (clientX - rect.left) * (canvas.width  / rect.width);
-  const y = (clientY - rect.top)  * (canvas.height / rect.height);
+  const r = canvas.getBoundingClientRect();
+  const x = (clientX - r.left) * (canvas.width  / r.width);
+  const y = (clientY - r.top)  * (canvas.height / r.height);
   const W = canvas.width, H = canvas.height;
-  // exclude tap targets
   if (Math.hypot(x - W*F.circleX, y - H*F.circleY) <= W*F.circleR) return null;
   if (x >= W*F.sqX && x <= W*(F.sqX+F.sqW) && y >= H*F.sqY && y <= H*(F.sqY+F.sqH)) return null;
-  // staircase = right side → controls dark/CMY; left → controls light/RGB
   return hitCtx.isPointInPath(x, y) ? 'dark' : 'light';
 }
 
-// ── Multi-touch tracking ───────────────────────────────────────────────────────
-// Map<pointerId, { x, y, t, zone, downX, downY, downTime }>
+// ── Input ─────────────────────────────────────────────────────────────────────
+canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
+canvas.addEventListener('touchmove',  e => e.preventDefault(), { passive: false });
+
 const activePointers = new Map();
 
 canvas.addEventListener('pointerdown', e => {
-  if (!started) return;
   canvas.setPointerCapture(e.pointerId);
-  const zone = getZone(e.clientX, e.clientY);
   activePointers.set(e.pointerId, {
-    x: e.clientX, y: e.clientY, t: performance.now(), zone,
+    x: e.clientX, y: e.clientY, t: performance.now(),
+    zone: getZone(e.clientX, e.clientY),
     downX: e.clientX, downY: e.clientY, downTime: performance.now()
   });
 });
 
 canvas.addEventListener('pointermove', e => {
   const p = activePointers.get(e.pointerId);
-  if (!p) return;
+  if (!p || !started) return;
   const now = performance.now();
   const dt  = Math.max(now - p.t, 1);
   const dx  = e.clientX - p.x;
   const dy  = e.clientY - p.y;
-
-  // Swipe down = accelerate, swipe up = decelerate/reverse — same for both sides
   const impulse = Math.abs(dy) > Math.abs(dx)
     ? (dy / canvas.height) * 0.5 * (16 / dt)
     : (dx / canvas.width)  * 0.5 * (16 / dt);
-
-  // Update zone dynamically — null = over tap target, skip
   p.zone = getZone(e.clientX, e.clientY);
   if (p.zone === 'dark')  velocityDark  += impulse;
-  if (p.zone === 'light') velocityLight -= impulse; // RGB rotates negative, invert to match
-
+  if (p.zone === 'light') velocityLight -= impulse;
   p.x = e.clientX; p.y = e.clientY; p.t = now;
 });
 
-canvas.addEventListener('pointerup', e => {
-  const p = activePointers.get(e.pointerId);
-  activePointers.delete(e.pointerId);
-  if (!p) return;
-  const dt   = performance.now() - p.downTime;
-  const dist = Math.hypot(e.clientX - p.downX, e.clientY - p.downY);
+// Detect platform
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
+function startExperience() {
+  if (started) return;
+  started = true;
+  // Fullscreen — Android/desktop only (iOS doesn't support it)
+  if (!isIOS) {
+    const doc = document.documentElement;
+    if (doc.requestFullscreen) doc.requestFullscreen().catch(() => {});
+    else if (doc.webkitRequestFullscreen) doc.webkitRequestFullscreen();
+  }
+  // Create AudioContext inside gesture handler — required by iOS Safari/Chrome
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  audioCtx.resume().then(() => buildAudioGraph());
+  lastFrameTime = 0;
+  rafId = requestAnimationFrame(render);
+}
+
+function handleTap(clientX, clientY, downTime, downX, downY) {
+  const dt   = performance.now() - downTime;
+  const dist = Math.hypot(clientX - downX, clientY - downY);
   if (dt < 300 && dist < 10) {
-    if (isInsideSquare(e.clientX, e.clientY)) {
+    if (isInsideSquare(clientX, clientY)) {
       const now = performance.now();
       tapCountSq = (now - lastTapTimeSq < TAP_WINDOW) ? tapCountSq + 1 : 1;
       lastTapTimeSq = now;
       if (tapCountSq >= 3) { tapCountSq = 0; resetExperience(); }
       else togglePauseDark();
-    } else if (isInsideCircle(e.clientX, e.clientY)) {
+    } else if (isInsideCircle(clientX, clientY)) {
       const now = performance.now();
       tapCount = (now - lastTapTime < TAP_WINDOW) ? tapCount + 1 : 1;
       lastTapTime = now;
@@ -464,9 +431,29 @@ canvas.addEventListener('pointerup', e => {
       else togglePauseLight();
     }
   }
+}
+
+// iOS: use touchend for reliable AudioContext unlock
+if (isIOS) {
+  canvas.addEventListener('touchend', e => {
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    if (!started) { startExperience(); return; }
+    // find matching pointer for tap detection
+    const p = [...activePointers.values()][0];
+    if (p) handleTap(t.clientX, t.clientY, p.downTime, p.downX, p.downY);
+  }, { passive: false });
+}
+
+canvas.addEventListener('pointerup', e => {
+  const p = activePointers.get(e.pointerId);
+  activePointers.delete(e.pointerId);
+  if (!p) return;
+  if (!started) { startExperience(); return; }
+  if (!isIOS) handleTap(e.clientX, e.clientY, p.downTime, p.downX, p.downY);
 });
 
-canvas.addEventListener('pointercancel', e => { activePointers.delete(e.pointerId); });
+canvas.addEventListener('pointercancel', e => activePointers.delete(e.pointerId));
 
 // ── Render loop ───────────────────────────────────────────────────────────────
 function render(now) {
@@ -477,29 +464,20 @@ function render(now) {
   velocityDark  *= friction;
   velocityLight *= friction;
 
-  // Cap velocity to avoid temporal aliasing (wagon-wheel effect)
-  // Max safe step = TAU/48 rad/frame (half the spacing between arms)
   const maxV = (Math.PI * 2 / 48 - ALL_SPEEDS[0]) / ALL_VEL_MULT[0];
   velocityDark  = Math.max(Math.min(velocityDark,  maxV), -maxV);
   velocityLight = Math.max(Math.min(velocityLight, maxV), -maxV);
 
-  // If velocity is positive (same as CMY natural direction) and decaying, clamp at 0
-  // — don't let it go negative unless user explicitly swiped that way
-
-
   if (!pausedDark) {
-    // clamp so CMY never goes negative (stops but doesn't reverse unless explicit swipe)
     const dStep = ALL_SPEEDS[0] + velocityDark * ALL_VEL_MULT[0];
     if (dStep > 0 || velocityDark < -ALL_SPEEDS[0] / ALL_VEL_MULT[0]) {
       angles[0] += ALL_SPEEDS[0] + velocityDark * ALL_VEL_MULT[0];
       angles[1] += ALL_SPEEDS[1] + velocityDark * ALL_VEL_MULT[1];
       angles[2] += ALL_SPEEDS[2] + velocityDark * ALL_VEL_MULT[2];
     }
-    // once stopped by deceleration, bleed velocity back toward 0 (don't re-accelerate)
     if (dStep <= 0 && velocityDark < 0) velocityDark = Math.min(velocityDark * friction, 0);
   }
   if (!pausedLight) {
-    // clamp so RGB never goes positive (stops but doesn't reverse unless explicit swipe)
     const lStep = ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3];
     if (lStep < 0 || velocityLight > -ALL_SPEEDS[3] / ALL_VEL_MULT[3]) {
       angles[3] += ALL_SPEEDS[3] + velocityLight * ALL_VEL_MULT[3];
